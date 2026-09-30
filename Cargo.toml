@@ -1,0 +1,8 @@
+[package]
+name = "kex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# For ultra-fast hashing and AST memory arenas
+bumpalo = "3.14"

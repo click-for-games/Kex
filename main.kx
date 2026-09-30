@@ -1,0 +1,57 @@
+kxout '=== KEX TESTER ===' ;
+
+// 1. Technical Datatypes & The 5 Mathematical Primitives
+let a = 10 ;
+let b = 3 ;
+
+let sum = a + b ;
+let diff = a - b ;
+let prod = a * b ;
+let quot = a / b ;
+let mod = a % b ;
+
+kxout 'Math Verification:' ;
+kxout sum ;
+kxout diff ;
+kxout prod ;
+kxout quot ;
+kxout mod ;
+
+// Comparisons & Boolean Logic
+let is_greater = a > b ;
+let check_logic = (a == 10) && (!is_greater == false) ;
+kxout 'Boolean Logic:' ;
+kxout check_logic ;
+
+// 2. Arrays & String Operations
+let scores = [10, 20, 30] ;
+scores[1] = 99 ;
+kxout 'Array Access & Assignment:' ;
+kxout scores[1] ;
+kxout 'Array Length:' ;
+kxout len(scores) ;
+
+// Type Conversion (Casting)
+let raw_str = '42' ;
+let parsed_num = cast(raw_str, 'num') ;
+kxout 'Type Cast Result:' ;
+kxout parsed_num + 8 ;
+
+// 3. Control Flow & Call Stack Mechanics
+fn calculate_factorial(n) {
+    let result = 1 ;
+    let count = n ;
+    while count > 1 {
+        result = result * count ;
+        count = count - 1 ;
+    }
+    return result ;
+}
+
+kxout 'Function Call Stack & Loop Iteration:' ;
+let fact5 = calculate_factorial(5) ;
+kxout fact5 ;
+
+// 4. Low-Level System Hook (I/O & Syscall)
+kxout 'System Capability:' ;
+syscall 'echo Kex system interface ONLINE' ;
