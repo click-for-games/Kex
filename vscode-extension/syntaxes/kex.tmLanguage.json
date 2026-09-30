@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kex",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.kex",
+      "match": "//.*$"
+    },
+    {
+      "name": "comment.block.kex",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    {
+      "name": "string.quoted.single.kex",
+      "begin": "'",
+      "end": "'"
+    },
+    {
+      "name": "string.quoted.double.kex",
+      "begin": "\"",
+      "end": "\""
+    },
+    {
+      "name": "keyword.control.kex",
+      "match": "\\b(let|if|else|while|fn|return|kxout|kxin|len|cast|syscall)\\b"
+    },
+    {
+      "name": "constant.language.boolean.kex",
+      "match": "\\b(true|false)\\b"
+    },
+    {
+      "name": "constant.numeric.kex",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    }
+  ],
+  "scopeName": "source.kx"
+}

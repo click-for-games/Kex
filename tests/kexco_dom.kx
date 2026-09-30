@@ -1,0 +1,119 @@
+// kexco tester: DOM
+//
+//   kex tests/kexco_dom.kx
+//   kex pack install kexco   (once)
+
+import "kexco";
+
+let checks = 0;
+let failures = 0;
+
+fn check(label, actual, expected) {
+    checks = checks + 1;
+    if (actual == expected) {
+        print("  ok    ", label);
+    } else {
+        failures = failures + 1;
+        print("  FAIL  ", label, " got ", actual, " want ", expected);
+    }
+}
+
+print("kexco ", kexco_version, " on the ", kexco_adapter, " adapter");
+
+// ---------------------------------------------------------------------------
+// build a small tree
+// ---------------------------------------------------------------------------
+
+let page = body();
+print("document");
+
+let header = create("header");
+add_class(header, "bar");
+set_attr(header, "id", "top");
+append(page, header);
+set_text(header, "kexco");
+check("header text", get_text(header), "kexco");
+
+let list = create("ul");
+add_class(list, "list");
+append(header, list);
+
+for label in ["alpha", "beta", "gamma"] {
+    let item = create("li");
+    add_class(item, "entry");
+    set_text(item, label);
+    append(list, item);
+}
+
+check("body tag", tag_of(page), "BODY");
+check("header tag", tag_of(header), "HEADER");
+check("header id", id_of(header), "top");
+check("header class", has_class(header, "bar"), true);
+check("list children", child_count(list), 3);
+check("first item", get_text(query(".entry")), "alpha");
+check("query all", len(query_all("li")), 3);
+check("query count", query_count("li"), 3);
+check("by tag", len(all_by_tag("li")), 3);
+check("by class", len(all_by_class("entry")), 3);
+check("by id", tag_of(by_id("top")), "HEADER");
+check("missing query", query_or_null("#nope"), null);
+
+// ---------------------------------------------------------------------------
+// attributes, styles and data
+// ---------------------------------------------------------------------------
+
+print("attributes");
+
+set_attr(header, "data-page", "1");
+check("get attr", get_attr(header, "data-page"), "1");
+check("has attr", has_attr(header, "data-page"), true);
+remove_attr(header, "data-page");
+check("removed attr", has_attr(header, "data-page"), false);
+
+set_style(header, "color", "red");
+check("style", get_style(header, "color"), "red");
+
+set_data(header, "role", "banner");
+check("data", get_data(header, "role"), "banner");
+check("missing data", get_data(header, "nope"), null);
+
+// ---------------------------------------------------------------------------
+// mutation
+// ---------------------------------------------------------------------------
+
+print("mutation");
+
+let extra = element("p", "appended", "note");
+append(list, extra);
+check("after append", child_count(list), 4);
+
+let first = create("p");
+set_text(first, "prepended");
+prepend(list, first);
+check("after prepend", get_text(all_by_tag("p")[0]), "prepended");
+
+remove(first);
+check("after remove", child_count(list), 4);
+
+set_html(extra, "<b>raw</b>");
+check("html round trip", get_html(extra), "<b>raw</b>");
+check("html parsed", get_text(extra), "raw");
+check("html child", tag_of(query("b")), "B");
+set_html(extra, "plain again");
+check("html reset", get_text(extra), "plain again");
+
+// ---------------------------------------------------------------------------
+// document level
+// ---------------------------------------------------------------------------
+
+print("document");
+
+set_title("kexco dom tester");
+check("title", title(), "kexco dom tester");
+check("ready state", ready_state(), "complete");
+
+print("");
+print(checks - failures, "/", checks, " dom checks passed");
+if (failures > 0) {
+    error("kexco dom tester failed");
+}

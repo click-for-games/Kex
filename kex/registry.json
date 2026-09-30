@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "updated": "2026-01-01",
+  "packages": [
+    {
+      "name": "kexco",
+      "version": "1.0.0",
+      "description": "Web library for Kex: DOM, fetch, storage, timers, events and a headless adapter",
+      "source": "kexco",
+      "entry": "kexco.kx",
+      "host": "lib/kexco.host.js",
+      "license": "MIT",
+      "homepage": "https://kex.dev/kexco"
+    }
+  ]
+}

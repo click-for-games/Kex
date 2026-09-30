@@ -1,0 +1,417 @@
+// ===========================================================================
+// kexco.kx - the Kex side of the kexco web library.
+//
+//   import "kexco";
+//
+// Requires a host bridge. Inside a browser the bridge is the kexco.host.js
+// dispatch table; from a terminal the Kex engine starts the same file with
+// node and the headless adapter takes over, so the identical .kx code runs
+// in both places. Test with:  kex pack host
+// ===========================================================================
+
+if (!host_ready()) {
+    error("kexco: no host bridge attached. Run 'kex pack install kexco' and make sure node is on PATH.");
+}
+
+let kexco_next_handler = 1;
+let kexco_handlers = {};
+
+export kexco_version = host('host.version');
+export kexco_info = host('host.info');
+export kexco_adapter = kexco_info.adapter;
+
+// ---------------------------------------------------------------------------
+// host plumbing
+// ---------------------------------------------------------------------------
+
+// Every host call funnels through here so failures carry kexco's name.
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
+
+fn create(tag) {
+    return host("dom.create", tag);
+}
+
+fn query(selector) {
+    let node = host("dom.query", selector);
+    if (node == null) {
+        error("kexco: dom.query found no element for '" + selector + "'");
+    }
+    return node;
+}
+
+fn query_or_null(selector) {
+    return host("dom.query", selector);
+}
+
+fn query_all(selector) {
+    return host("dom.queryAll", selector);
+}
+
+fn query_count(selector) {
+    return len(host("dom.queryAll", selector));
+}
+
+fn all_by_tag(tag) {
+    return host("dom.byTag", tag);
+}
+
+fn all_by_class(name) {
+    return host("dom.byClass", name);
+}
+
+fn by_id(id) {
+    let node = host("dom.byId", id);
+    if (node == null) {
+        error("kexco: no element with id '" + id + "'");
+    }
+    return node;
+}
+
+fn by_id_or_null(id) {
+    return host("dom.byId", id);
+}
+
+fn append(parent, child) {
+    return host("dom.append", parent, child);
+}
+
+fn prepend(parent, child) {
+    return host("dom.prepend", parent, child);
+}
+
+fn remove(node) {
+    return host("dom.remove", node);
+}
+
+fn set_text(node, text) {
+    return host("dom.setText", node, text);
+}
+
+fn get_text(node) {
+    return host("dom.getText", node);
+}
+
+fn set_html(node, html) {
+    return host("dom.setHtml", node, html);
+}
+
+fn get_html(node) {
+    return host("dom.getHtml", node);
+}
+
+fn set_attr(node, name, value) {
+    return host("dom.setAttr", node, name, value);
+}
+
+fn get_attr(node, name) {
+    return host("dom.getAttr", node, name);
+}
+
+fn remove_attr(node, name) {
+    return host("dom.removeAttr", node, name);
+}
+
+fn has_attr(node, name) {
+    return host("dom.hasAttr", node, name);
+}
+
+fn add_class(node, name) {
+    return host("dom.addClass", node, name);
+}
+
+fn remove_class(node, name) {
+    return host("dom.removeClass", node, name);
+}
+
+fn has_class(node, name) {
+    return host("dom.hasClass", node, name);
+}
+
+fn set_style(node, property, value) {
+    return host("dom.setStyle", node, property, value);
+}
+
+fn get_style(node, property) {
+    return host("dom.getStyle", node, property);
+}
+
+fn set_data(node, key, value) {
+    return host("dom.setData", node, key, value);
+}
+
+fn get_data(node, key) {
+    return host("dom.getData", node, key);
+}
+
+fn tag_of(node) {
+    return host("dom.getTag", node);
+}
+
+fn id_of(node) {
+    return host("dom.getId", node);
+}
+
+fn child_count(node) {
+    return host("dom.children", node);
+}
+
+fn body() {
+    return host("dom.body");
+}
+
+fn document() {
+    return host("dom.document");
+}
+
+fn set_title(text) {
+    return host("dom.setTitle", text);
+}
+
+fn title() {
+    return host("dom.title");
+}
+
+fn ready_state() {
+    return host("dom.readyState");
+}
+
+// Convenience: build an element and fill it in one call.
+fn element(tag, text, class_name) {
+    let node = create(tag);
+    if (text != null) { set_text(node, text); }
+    if (class_name != null) { add_class(node, class_name); }
+    return node;
+}
+
+// ---------------------------------------------------------------------------
+// events
+//
+// Handlers are registered by integer id. Nothing is called back across the
+// bridge: kexco collects events host side and pump() dispatches them.
+// ---------------------------------------------------------------------------
+
+fn on(node, event_type, handler) {
+    let id = kexco_next_handler;
+    kexco_next_handler = kexco_next_handler + 1;
+    kexco_handlers[id] = { "type": event_type, "fn": handler, "node": node };
+    host("events.on", node, event_type, id);
+    return id;
+}
+
+fn off(handler_id) {
+    let entry = kexco_handlers[handler_id];
+    if (entry == null) { return null; }
+    host("events.off", entry.node, handler_id);
+    kexco_handlers[handler_id] = null;
+    return null;
+}
+
+fn fire(node, event_type, detail) {
+    return host("events.fire", node, event_type, detail);
+}
+
+fn fired_events(node) {
+    return host("events.fired", node);
+}
+
+// Dispatches everything the host has queued. Returns how many ran.
+fn pump() {
+    let queue = host("events.drain");
+    let ran = 0;
+    for entry in queue {
+        let handler_id = entry.handler;
+        let record = kexco_handlers[handler_id];
+        if (record == null) { continue; }
+        record.fn(entry);
+        ran = ran + 1;
+    }
+    return ran;
+}
+
+// ---------------------------------------------------------------------------
+// timers
+// ---------------------------------------------------------------------------
+
+fn timer_start(delay_ms, handler) {
+    let id = kexco_next_handler;
+    kexco_next_handler = kexco_next_handler + 1;
+    kexco_handlers[id] = { "type": "timer", "fn": handler, "node": null };
+    host("timers.set", delay_ms);
+    return id;
+}
+
+fn timer_cancel(handler_id) {
+    let record = kexco_handlers[handler_id];
+    if (record == null) { return null; }
+    host("timers.clear", handler_id);
+    kexco_handlers[handler_id] = null;
+    return null;
+}
+
+// Advances the deterministic clock, then drains timers and events.
+fn tick(ms) {
+    let fired = host("timers.tick", ms);
+    let ran = pump();
+    return len(fired) + ran;
+}
+
+fn pending_timers() {
+    return host("timers.pending");
+}
+
+// ---------------------------------------------------------------------------
+// storage
+// ---------------------------------------------------------------------------
+
+fn store_set(key, value) {
+    return host("storage.set", key, to_str(value));
+}
+
+fn store_get(key) {
+    return host("storage.get", key);
+}
+
+fn store_remove(key) {
+    return host("storage.remove", key);
+}
+
+fn store_clear() {
+    return host("storage.clear");
+}
+
+fn store_length() {
+    return host("storage.length");
+}
+
+fn store_key(index) {
+    return host("storage.key", index);
+}
+
+fn store_all() {
+    return host("storage.all");
+}
+
+fn session_set(key, value) {
+    return host("session.set", key, to_str(value));
+}
+
+fn session_get(key) {
+    return host("session.get", key);
+}
+
+fn session_remove(key) {
+    return host("session.remove", key);
+}
+
+fn session_clear() {
+    return host("session.clear");
+}
+
+fn session_length() {
+    return host("session.length");
+}
+
+// ---------------------------------------------------------------------------
+// net
+// ---------------------------------------------------------------------------
+
+// Registers a canned response so fetch() has something to resolve in tests.
+fn route(method, url, status, body) {
+    return host("net.route", method, url, status, body);
+}
+
+fn routes() {
+    return host("net.routes");
+}
+
+fn get(url) {
+    return host("net.get", url);
+}
+
+fn post(url, body) {
+    return host("net.post", url, body);
+}
+
+fn put(url, body) {
+    return host("net.put", url, body);
+}
+
+fn del(url) {
+    return host("net.delete", url);
+}
+
+// ---------------------------------------------------------------------------
+// utilities
+// ---------------------------------------------------------------------------
+
+fn json_parse(text) {
+    return host("json.parse", text);
+}
+
+fn json_stringify(value) {
+    return host("json.stringify", value);
+}
+
+fn to_base64(text) {
+    return host("base64.encode", text);
+}
+
+fn from_base64(text) {
+    return host("base64.decode", text);
+}
+
+fn timestamp() {
+    return host("env.now");
+}
+
+fn uuid() {
+    return host("env.uuid");
+}
+
+fn user_agent() {
+    return host("env.userAgent");
+}
+
+fn language() {
+    return host("env.language");
+}
+
+fn location() {
+    return host("url.location");
+}
+
+fn parse_url(raw) {
+    return host("url.parse", raw);
+}
+
+fn capabilities() {
+    return host("host.capabilities");
+}
+
+// ---------------------------------------------------------------------------
+// higher level helpers built on top of the primitives
+// ---------------------------------------------------------------------------
+
+// Renders a list of records into a container as child elements.
+fn render_list(container, rows, tag) {
+    for row in rows {
+        let node = create(tag == null ? "li" : tag);
+        set_text(node, row.label == null ? to_str(row) : row.label);
+        set_data(node, "id", row.id == null ? "" : to_str(row.id));
+        append(container, node);
+    }
+    return child_count(container);
+}
+
+// A tiny counter backed by storage, useful for demos and tests.
+fn bump_counter(key) {
+    let raw = store_get(key);
+    let next = 1;
+    if (raw != null) {
+        next = parse_num(raw) + 1;
+    }
+    store_set(key, next);
+    return next;
+}

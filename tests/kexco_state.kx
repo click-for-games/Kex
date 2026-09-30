@@ -1,0 +1,155 @@
+// kexco tester: storage, session, events and timers
+//
+//   kex tests/kexco_state.kx
+
+import "kexco";
+
+let checks = 0;
+let failures = 0;
+
+fn check(label, actual, expected) {
+    checks = checks + 1;
+    if (actual == expected) {
+        print("  ok    ", label);
+    } else {
+        failures = failures + 1;
+        print("  FAIL  ", label, " got ", actual, " want ", expected);
+    }
+}
+
+print("kexco ", kexco_version, " on the ", kexco_adapter, " adapter");
+
+// ---------------------------------------------------------------------------
+// local storage
+// ---------------------------------------------------------------------------
+
+print("local storage");
+
+store_clear();
+check("empty length", store_length(), 0);
+check("missing key", store_get("nope"), null);
+
+store_set("name", "kex");
+store_set("count", 3);
+check("length", store_length(), 2);
+check("string value", store_get("name"), "kex");
+check("mixed value", store_get("count"), "3");
+check("key 0", store_key(0), "name");
+
+store_remove("name");
+check("after remove", store_length(), 1);
+check("removed value", store_get("name"), null);
+
+// values are always stored as text, so numbers and objects round trip safely
+store_set("list", [1, 2, 3]);
+check("array as text", store_get("list"), "1,2,3");
+check("bump 1", bump_counter("visits"), 1);
+check("bump 2", bump_counter("visits"), 2);
+check("bump 3", bump_counter("visits"), 3);
+
+let everything = store_all();
+check("all length", len(everything), 4);
+check("all has visits", has_key(everything, "visits"), true);
+
+// ---------------------------------------------------------------------------
+// session storage
+// ---------------------------------------------------------------------------
+
+print("session storage");
+
+session_clear();
+session_set("tab", "one");
+check("session get", session_get("tab"), "one");
+check("session length", session_length(), 1);
+check("session missing", session_get("other"), null);
+session_remove("tab");
+check("session after remove", session_length(), 0);
+
+// the two stores must not leak into each other
+check("local untouched", store_length(), 4);
+
+// ---------------------------------------------------------------------------
+// events
+//
+// Handlers live on the Kex side. Nothing is called back across the bridge:
+// the host records what happened and pump() dispatches it.
+// ---------------------------------------------------------------------------
+
+print("events");
+
+let log = [];
+
+let button = element("button", "press me", "btn");
+append(body(), button);
+
+let clicks = on(button, "click", (event) => {
+    log.push("clicked:" + event.type + ":" + event.detail);
+});
+
+let other = on(button, "keydown", (event) => {
+    log.push("keyed:" + event.type);
+});
+
+check("handler ids differ", clicks != other, true);
+check("nothing queued yet", len(fired_events(button)), 0);
+
+fire(button, "click", "go");
+check("event recorded", len(fired_events(button)), 1);
+check("nothing dispatched yet", len(log), 0);
+
+let ran = pump();
+check("pump ran one handler", ran, 1);
+check("log", log[0], "clicked:click:go");
+
+fire(button, "keydown", null);
+fire(button, "click", "again");
+check("pump ran two", pump(), 2);
+check("log grew", len(log), 3);
+check("key event", log[1], "keyed:keydown");
+check("second click", log[2], "clicked:click:again");
+
+check("queue drained", pump(), 0);
+
+off(clicks);
+fire(button, "click", "ignored");
+check("removed handler does not run", pump(), 0);
+check("log unchanged", len(log), 3);
+
+// ---------------------------------------------------------------------------
+// timers
+// ---------------------------------------------------------------------------
+
+print("timers");
+
+let ticks = [];
+let first = timer_start(50, (info) => {
+    ticks.push("first@" + info.detail);
+});
+let second = timer_start(150, (info) => {
+    ticks.push("second@" + info.detail);
+});
+let third = timer_start(500, (info) => {
+    ticks.push("third@" + info.detail);
+});
+
+check("three pending", len(pending_timers()), 3);
+check("nothing fired yet", len(ticks), 0);
+
+check("tick 60 dispatches one", tick(60), 1);
+check("first ran", ticks[0], "first@50");
+
+check("tick 200 dispatches one", tick(200), 1);
+check("second ran", ticks[1], "second@150");
+
+check("two left", len(pending_timers()), 1);
+
+timer_cancel(third);
+check("cancel empties the queue", len(pending_timers()), 0);
+check("nothing more", tick(1000), 0);
+check("log", len(ticks), 2);
+
+print("");
+print(checks - failures, "/", checks, " state checks passed");
+if (failures > 0) {
+    error("kexco state tester failed");
+}

@@ -1,1 +1,15 @@
-/target
+# Cargo build cache. The release binary is tracked so the installer and the
+# releases page can be rebuilt from a clone, but nothing else under target/ is.
+kex/target/*
+!kex/target/release/
+kex/target/release/*
+!kex/target/release/kex.exe
+kex/target/release/incremental/
+
+# Node
+node_modules/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.user
