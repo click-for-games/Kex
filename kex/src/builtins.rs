@@ -1,7 +1,11 @@
 use crate::error::{error, expected, Signal};
+use crate::json::{self, Json};
 use crate::runtime::length_of;
 use crate::value::*;
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // MODULE 6: BUILTIN STANDARD LIBRARY
@@ -114,6 +118,315 @@ fn string_index(len: usize, raw: &KexValue, who: &str) -> Result<usize, Signal> 
         )));
     }
     Ok(n as usize)
+}
+
+// ----- library helpers -----------------------------------------------------
+
+fn member_at(value: &KexValue, key: &str) -> KexValue {
+    match value {
+        KexValue::Object(obj) => obj.get(key).cloned().unwrap_or(KexValue::Null),
+        KexValue::Array(items) => key
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| items.get(i).cloned())
+            .unwrap_or(KexValue::Null),
+        _ => KexValue::Null,
+    }
+}
+
+fn lookup_path(root: &KexValue, path: &str) -> KexValue {
+    if path.is_empty() {
+        return root.clone();
+    }
+    let mut current = root.clone();
+    for part in path.split('.').filter(|p| !p.is_empty()) {
+        current = member_at(&current, part);
+    }
+    current
+}
+
+fn set_path(root: &mut KexValue, parts: &[&str], value: KexValue) {
+    if parts.is_empty() {
+        *root = value;
+        return;
+    }
+    match root {
+        KexValue::Object(obj) => {
+            if parts.len() == 1 {
+                obj.set(parts[0], value);
+            } else {
+                let mut child = obj.get(parts[0]).cloned().unwrap_or(KexValue::Null);
+                set_path(&mut child, &parts[1..], value);
+                obj.set(parts[0], child);
+            }
+        }
+        KexValue::Array(items) => {
+            if let Ok(index) = parts[0].parse::<usize>() {
+                while items.len() <= index {
+                    items.push(KexValue::Null);
+                }
+                set_path(&mut items[index], &parts[1..], value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn path_string(args: &[KexValue], index: usize, who: &str) -> Result<String, Signal> {
+    let value = arg(args, index);
+    match value {
+        KexValue::String(text) => Ok(replace_home(&text)),
+        other => Err(error(format!(
+            "{}() expects a path string but received a {}",
+            who,
+            other.type_name()
+        ))),
+    }
+}
+
+fn replace_home(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+            return Path::new(&home).join(rest).to_string_lossy().to_string();
+        }
+    }
+    text.to_string()
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        let bits = (a << 16) | (b << 8) | c;
+        out.push(BASE64_ALPHABET[((bits >> 18) & 63) as usize] as char);
+        out.push(BASE64_ALPHABET[((bits >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((bits >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(bits & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn base64_decode(text: &str) -> Result<Vec<u8>, Signal> {
+    let clean: Vec<u8> = text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    if clean.len() % 4 == 1 {
+        return Err(error("base64_decode() received malformed input"));
+    }
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    for chunk in clean.chunks(4) {
+        let mut bits = 0u32;
+        for byte in chunk {
+            let value = BASE64_ALPHABET.iter().position(|c| *c == *byte).ok_or_else(|| {
+                error("base64_decode() received an invalid character")
+            })? as u32;
+            bits = (bits << 6) | value;
+        }
+        let used = chunk.len();
+        bits <<= (4 - used) * 6;
+        out.push((bits >> 16) as u8);
+        if used > 2 {
+            out.push((bits >> 8) as u8);
+        }
+        if used > 3 {
+            out.push(bits as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (year + if month <= 2 { 1 } else { 0 }, month, day)
+}
+
+struct DateParts {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    millis: i64,
+    weekday: i64,
+    epoch: f64,
+}
+
+fn date_parts(epoch_ms: f64) -> DateParts {
+    let total = epoch_ms as i64;
+    let seconds = total.div_euclid(1000);
+    let millis = total.rem_euclid(1000);
+    let days = seconds.div_euclid(86400);
+    let time = seconds.rem_euclid(86400);
+    let (year, month, day) = civil_from_days(days);
+    DateParts {
+        year,
+        month,
+        day,
+        hour: time / 3600,
+        minute: (time % 3600) / 60,
+        second: time % 60,
+        millis,
+        weekday: days.rem_euclid(7),
+        epoch: epoch_ms,
+    }
+}
+
+fn iso_date(parts: &DateParts) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        parts.year,
+        parts.month,
+        parts.day,
+        parts.hour,
+        parts.minute,
+        parts.second,
+        parts.millis
+    )
+}
+
+fn words_of(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect()
+}
+
+static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn make_uuid() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15);
+    let counter = UUID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let random = (pseudo_random() * u64::MAX as f64) as u64;
+    let bytes = nanos
+        .to_be_bytes()
+        .into_iter()
+        .chain((random ^ counter.wrapping_mul(0x9E3779B97F4A7C15)).to_be_bytes())
+        .collect::<Vec<u8>>();
+    let mut hex: Vec<u8> = bytes.iter().flat_map(|b| [b / 16, b % 16]).collect();
+    for (i, nibble) in hex.iter_mut().enumerate() {
+        *nibble = match *nibble {
+            0..=9 => b'0' + *nibble,
+            _ => b'a' + (*nibble - 10),
+        };
+        let _ = i;
+    }
+    hex[12] = b'4';
+    hex[16] = match hex[16] {
+        b'0'..=b'3' => b'8',
+        b'4'..=b'7' => b'9',
+        b'8'..=b'b' => b'a',
+        _ => b'b',
+    };
+    let text = String::from_utf8(hex).unwrap_or_default();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &text[0..8],
+        &text[8..12],
+        &text[12..16],
+        &text[16..20],
+        &text[20..32]
+    )
+}
+
+fn fnv1a64(text: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Shared implementation for `format()` and `{value:spec}` interpolation.
+pub fn format_spec(value: &KexValue, spec: &str) -> String {
+    let spec = spec.trim();
+    let spec = spec.strip_prefix(':').unwrap_or(spec);
+    let number = value.as_number();
+    let mut out = match spec {
+        "" => value.to_display(),
+        "d" | "i" => match number {
+            Some(n) => format!("{}", n as i64),
+            None => value.to_display(),
+        },
+        "x" => format!("{:x}", number.unwrap_or(0.0) as i64),
+        "X" => format!("{:X}", number.unwrap_or(0.0) as i64),
+        "b" => format!("{:b}", number.unwrap_or(0.0) as i64),
+        "o" => format!("{:o}", number.unwrap_or(0.0) as i64),
+        "f" => format!("{:.2}", number.unwrap_or(0.0)),
+        "e" => format!("{:e}", number.unwrap_or(0.0)),
+        "E" => format!("{:E}", number.unwrap_or(0.0)),
+        "p" => format!("{:.4}", number.unwrap_or(0.0)),
+        "q" => value.inspect(),
+        "k" => value.type_name().to_string(),
+        "s" => value.to_display(),
+        "c" => match number {
+            Some(n) => char::from_u32(n as u32).map(|c| c.to_string()).unwrap_or_default(),
+            None => value.to_display(),
+        },
+        other => {
+            let precision = other
+                .strip_prefix('f')
+                .or_else(|| other.strip_prefix('.'))
+                .and_then(|rest| rest.trim_end_matches('f').parse::<usize>().ok());
+            match precision {
+                Some(p) => format!("{:.*}", p, number.unwrap_or(0.0)),
+                None => value.to_display(),
+            }
+        }
+    };
+    if spec.len() > 1 {
+        let (align, width) = match spec.as_bytes().last().copied() {
+            Some(b'>') | Some(b'<') | Some(b'^') => {
+                let width: String = spec[..spec.len() - 1].chars().filter(|c| c.is_ascii_digit()).collect();
+                (spec.chars().last().unwrap(), width.parse::<usize>().ok())
+            }
+            _ => {
+                let digits: String = spec.chars().filter(|c| c.is_ascii_digit()).collect();
+                (if spec.starts_with('0') { '0' } else { '>' }, digits.parse::<usize>().ok())
+            }
+        };
+        if let Some(width) = width {
+            if out.chars().count() < width {
+                let pad = width - out.chars().count();
+                out = match align {
+                    '<' => format!("{}{}", out, " ".repeat(pad)),
+                    '^' => {
+                        let left = pad / 2;
+                        format!("{}{}{}", " ".repeat(left), out, " ".repeat(pad - left))
+                    }
+                    '0' => format!("{}{}", "0".repeat(pad), out),
+                    _ => format!("{}{}", " ".repeat(pad), out),
+                };
+            }
+        }
+    }
+    out
 }
 
 // ----- registry ------------------------------------------------------------
@@ -421,20 +734,7 @@ pub static BUILTINS: &[(&str, &str, BuiltinImpl)] = &[
                     let field: String = chars[cursor + 1..cursor + offset].iter().collect();
                     let value = arg(&a, next_arg);
                     next_arg += 1;
-                    out.push_str(&match field.as_str() {
-                        "" => value.to_display(),
-                        "d" => match value.as_number() {
-                            Some(n) => format!("{}", n as i64),
-                            None => value.to_display(),
-                        },
-                        "x" => format!("{:x}", value.as_number().unwrap_or(0.0) as i64),
-                        "X" => format!("{:X}", value.as_number().unwrap_or(0.0) as i64),
-                        "f" => format!("{:.2}", value.as_number().unwrap_or(0.0)),
-                        "p" => format!("{:.4}", value.as_number().unwrap_or(0.0)),
-                        "q" => value.inspect(),
-                        "k" => value.type_name().to_string(),
-                        other => format!("{{{}:{}}}", other, value.to_display()),
-                    });
+                    out.push_str(&format_spec(&value, field.trim_start_matches(':')));
                     cursor += offset + 1;
                     continue;
                 }
@@ -729,6 +1029,557 @@ pub static BUILTINS: &[(&str, &str, BuiltinImpl)] = &[
                 .unwrap_or(0.0),
         ))
     }),
+    // ---- json
+    ("json_parse", "parse JSON text into a Kex value", |_rt, a| {
+        let text = need_str(&a, 0, "json_parse")?;
+        Json::parse(&text)
+            .map(|j| json::to_value(&j))
+            .map_err(error)
+    }),
+    ("json_stringify", "turn a Kex value into compact JSON", |_rt, a| {
+        Ok(KexValue::string(json::from_value(&arg(&a, 0)).stringify()))
+    }),
+    ("json_pretty", "turn a Kex value into indented JSON", |_rt, a| {
+        fn indent(json: &Json, level: usize, out: &mut String) {
+            match json {
+                Json::Obj(entries) => {
+                    out.push('{');
+                    for (i, (key, value)) in entries.iter().enumerate() {
+                        if i > 0 { out.push(','); }
+                        out.push('\n');
+                        out.push_str(&"  ".repeat(level + 1));
+                        let mut quoted = String::new();
+                        quoted.push('"');
+                        for c in key.chars() {
+                            match c {
+                                '"' => quoted.push_str("\\\""),
+                                '\\' => quoted.push_str("\\\\"),
+                                _ => quoted.push(c),
+                            }
+                        }
+                        quoted.push('"');
+                        out.push_str(&quoted);
+                        out.push_str(": ");
+                        indent(value, level + 1, out);
+                    }
+                    out.push('\n');
+                    out.push_str(&"  ".repeat(level));
+                    out.push('}');
+                }
+                Json::Arr(items) => {
+                    out.push('[');
+                    for (i, value) in items.iter().enumerate() {
+                        if i > 0 { out.push(','); }
+                        out.push('\n');
+                        out.push_str(&"  ".repeat(level + 1));
+                        indent(value, level + 1, out);
+                    }
+                    out.push('\n');
+                    out.push_str(&"  ".repeat(level));
+                    out.push(']');
+                }
+                other => out.push_str(&other.stringify()),
+            }
+        }
+        let mut out = String::new();
+        indent(&json::from_value(&arg(&a, 0)), 0, &mut out);
+        Ok(KexValue::string(out))
+    }),
+    ("json_get", "read a dot separated path from parsed JSON", |_rt, a| {
+        let path = if a.len() > 1 { need_str(&a, 1, "json_get")? } else { String::new() };
+        Ok(lookup_path(&arg(&a, 0), &path))
+    }),
+    ("json_set", "set a dot separated path in parsed JSON", |_rt, a| {
+        let path = need_str(&a, 1, "json_set")?;
+        let mut root = arg(&a, 0);
+        let parts: Vec<&str> = path.split('.').filter(|p| !p.is_empty()).collect();
+        set_path(&mut root, &parts, arg(&a, 2));
+        Ok(root)
+    }),
+
+    // ---- files and paths
+    ("file_read", "read a UTF-8 file", |_rt, a| {
+        let path = path_string(&a, 0, "file_read")?;
+        fs::read_to_string(&path).map(KexValue::string).map_err(|e| error(format!("file_read({}): {}", path, e)))
+    }),
+    ("file_write", "write a UTF-8 file, replacing its contents", |_rt, a| {
+        let path = path_string(&a, 0, "file_write")?;
+        let text = need_str(&a, 1, "file_write")?;
+        fs::write(&path, text).map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_write({}): {}", path, e)))
+    }),
+    ("file_append", "append text to a UTF-8 file", |_rt, a| {
+        use std::io::Write as _;
+        let path = path_string(&a, 0, "file_append")?;
+        let text = need_str(&a, 1, "file_append")?;
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)
+            .map_err(|e| error(format!("file_append({}): {}", path, e)))?;
+        file.write_all(text.as_bytes()).map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_append({}): {}", path, e)))
+    }),
+    ("file_exists", "true when a file or folder exists", |_rt, a| {
+        Ok(KexValue::Boolean(Path::new(&path_string(&a, 0, "file_exists")?).exists()))
+    }),
+    ("file_delete", "delete a file or an empty directory", |_rt, a| {
+        let path = path_string(&a, 0, "file_delete")?;
+        let result = if Path::new(&path).is_dir() { fs::remove_dir(&path) } else { fs::remove_file(&path) };
+        result.map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_delete({}): {}", path, e)))
+    }),
+    ("file_copy", "copy a file", |_rt, a| {
+        let from = path_string(&a, 0, "file_copy")?;
+        let to = path_string(&a, 1, "file_copy")?;
+        fs::copy(&from, &to).map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_copy: {}", e)))
+    }),
+    ("file_move", "move or rename a file", |_rt, a| {
+        let from = path_string(&a, 0, "file_move")?;
+        let to = path_string(&a, 1, "file_move")?;
+        fs::rename(&from, &to).map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_move: {}", e)))
+    }),
+    ("file_list", "list the names inside a directory", |_rt, a| {
+        let path = path_string(&a, 0, "file_list")?;
+        let mut names: Vec<String> = fs::read_dir(&path)
+            .map_err(|e| error(format!("file_list({}): {}", path, e)))?
+            .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+            .collect();
+        names.sort();
+        Ok(KexValue::Array(names.into_iter().map(KexValue::string).collect()))
+    }),
+    ("file_mkdir", "create a directory and its parents", |_rt, a| {
+        let path = path_string(&a, 0, "file_mkdir")?;
+        fs::create_dir_all(&path).map(|_| KexValue::Boolean(true)).map_err(|e| error(format!("file_mkdir({}): {}", path, e)))
+    }),
+    ("file_meta", "metadata about a file or folder", |_rt, a| {
+        let path = path_string(&a, 0, "file_meta")?;
+        let meta = fs::metadata(&path).map_err(|e| error(format!("file_meta({}): {}", path, e)))?;
+        let mut obj = KexObject::new();
+        obj.set("size", KexValue::Number(meta.len() as f64));
+        obj.set("is_file", KexValue::Boolean(meta.is_file()));
+        obj.set("is_dir", KexValue::Boolean(meta.is_dir()));
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        obj.set("modified", KexValue::Number(modified));
+        Ok(KexValue::Object(obj))
+    }),
+    ("file_name", "final component of a path", |_rt, a| {
+        let path = path_string(&a, 0, "file_name")?;
+        Ok(KexValue::string(Path::new(&path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
+    }),
+    ("file_ext", "extension of a path, without the dot", |_rt, a| {
+        let path = path_string(&a, 0, "file_ext")?;
+        Ok(KexValue::string(Path::new(&path).extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
+    }),
+    ("file_dir", "parent directory of a path", |_rt, a| {
+        let path = path_string(&a, 0, "file_dir")?;
+        Ok(KexValue::string(Path::new(&path).parent().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
+    }),
+    ("path_join", "join path components", |_rt, a| {
+        let mut out = std::path::PathBuf::new();
+        for value in &a {
+            out.push(path_string(&[value.clone()], 0, "path_join")?);
+        }
+        Ok(KexValue::string(out.to_string_lossy().to_string()))
+    }),
+    ("path_abs", "absolute form of a path", |_rt, a| {
+        let path = path_string(&a, 0, "path_abs")?;
+        std::fs::canonicalize(&path)
+            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(&path)))
+            .map(|p| KexValue::string(p.to_string_lossy().to_string()))
+            .map_err(|e| error(format!("path_abs: {}", e)))
+    }),
+    ("cwd", "current working directory", |_rt, _a| {
+        Ok(KexValue::string(std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()))
+    }),
+    ("env_get", "read an environment variable", |_rt, a| {
+        let name = need_str(&a, 0, "env_get")?;
+        Ok(std::env::var(name).map(KexValue::string).unwrap_or_else(|_| arg(&a, 1)))
+    }),
+    ("env_set", "set an environment variable", |_rt, a| {
+        let name = need_str(&a, 0, "env_set")?;
+        let value = need_str(&a, 1, "env_set")?;
+        std::env::set_var(name, value);
+        Ok(KexValue::Boolean(true))
+    }),
+
+    // ---- strings, extended
+    ("title", "capitalise every word", |_rt, a| {
+        let text = need_str(&a, 0, "title")?;
+        let mut out = String::new();
+        let mut capital = true;
+        for c in text.chars() {
+            if c.is_alphanumeric() {
+                if capital { out.extend(c.to_uppercase()); } else { out.extend(c.to_lowercase()); }
+                capital = false;
+            } else {
+                out.push(c);
+                capital = true;
+            }
+        }
+        Ok(KexValue::string(out))
+    }),
+    ("slug", "make a URL safe slug", |_rt, a| {
+        let text = need_str(&a, 0, "slug")?.to_lowercase();
+        let out: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+        Ok(KexValue::string(out.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-")))
+    }),
+    ("camel", "convert text to camelCase", |_rt, a| {
+        let words = words_of(&need_str(&a, 0, "camel")?);
+        let mut out = String::new();
+        for (i, word) in words.iter().enumerate() {
+            let mut chars = word.chars();
+            if i == 0 {
+                out.push_str(&word.to_lowercase());
+            } else if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+                out.push_str(&chars.as_str().to_lowercase());
+            }
+        }
+        Ok(KexValue::string(out))
+    }),
+    ("snake", "convert text to snake_case", |_rt, a| {
+        Ok(KexValue::string(words_of(&need_str(&a, 0, "snake")?).join("_").to_lowercase()))
+    }),
+    ("kebab", "convert text to kebab-case", |_rt, a| {
+        Ok(KexValue::string(words_of(&need_str(&a, 0, "kebab")?).join("-").to_lowercase()))
+    }),
+    ("trim_start", "trim whitespace from the start", |_rt, a| {
+        Ok(KexValue::string(need_str(&a, 0, "trim_start")?.trim_start().to_string()))
+    }),
+    ("trim_end", "trim whitespace from the end", |_rt, a| {
+        Ok(KexValue::string(need_str(&a, 0, "trim_end")?.trim_end().to_string()))
+    }),
+    ("replace_all", "replace every occurrence of a substring", |_rt, a| {
+        let text = need_str(&a, 0, "replace_all")?;
+        let from = need_str(&a, 1, "replace_all")?;
+        let to = arg(&a, 2).to_display();
+        Ok(KexValue::string(text.replace(&from, &to)))
+    }),
+    ("split_lines", "split text into lines", |_rt, a| {
+        let text = need_str(&a, 0, "split_lines")?;
+        Ok(KexValue::Array(text.lines().map(|line| KexValue::string(line)).collect()))
+    }),
+    ("count_of", "count occurrences of a substring", |_rt, a| {
+        let text = need_str(&a, 0, "count_of")?;
+        let needle = need_str(&a, 1, "count_of")?;
+        Ok(KexValue::Number(if needle.is_empty() { 0.0 } else { text.matches(&needle).count() as f64 }))
+    }),
+    ("is_alpha", "true when text contains only letters", |_rt, a| {
+        let text = need_str(&a, 0, "is_alpha")?;
+        Ok(KexValue::Boolean(!text.is_empty() && text.chars().all(|c| c.is_alphabetic())))
+    }),
+    ("is_digit", "true when text contains only digits", |_rt, a| {
+        let text = need_str(&a, 0, "is_digit")?;
+        Ok(KexValue::Boolean(!text.is_empty() && text.chars().all(|c| c.is_ascii_digit())))
+    }),
+    ("is_alnum", "true when text contains only letters and digits", |_rt, a| {
+        let text = need_str(&a, 0, "is_alnum")?;
+        Ok(KexValue::Boolean(!text.is_empty() && text.chars().all(|c| c.is_alphanumeric())))
+    }),
+    ("is_space", "true when text is empty or all whitespace", |_rt, a| {
+        Ok(KexValue::Boolean(need_str(&a, 0, "is_space")?.chars().all(|c| c.is_whitespace())))
+    }),
+    ("quote", "wrap text in double quotes with escapes", |_rt, a| {
+        Ok(KexValue::string(escape_string(&arg(&a, 0).to_display())))
+    }),
+    ("unquote", "remove matching outer quotes", |_rt, a| {
+        let text = need_str(&a, 0, "unquote")?;
+        let trimmed = text.trim();
+        let inner = if trimmed.len() >= 2
+            && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+                || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+        {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        Ok(KexValue::string(inner))
+    }),
+
+    // ---- arrays, extended
+    ("concat", "join two or more arrays", |_rt, a| {
+        let mut out = Vec::new();
+        for value in &a {
+            match value {
+                KexValue::Array(items) => out.extend(items.clone()),
+                other => out.push(other.clone()),
+            }
+        }
+        Ok(KexValue::Array(out))
+    }),
+    ("count", "count matching items, or all items", |rt, a| {
+        let items = need_array(&a, 0, "count")?;
+        let mut total = 0.0;
+        for item in &items {
+            let keep = if a.len() > 1 {
+                rt.call_value(arg(&a, 1), vec![item.clone()])?.is_truthy()
+            } else {
+                true
+            };
+            if keep { total += 1.0; }
+        }
+        Ok(KexValue::Number(total))
+    }),
+    ("some", "true when any item matches a predicate", |rt, a| {
+        let items = need_array(&a, 0, "some")?;
+        for item in &items {
+            if rt.call_value(arg(&a, 1), vec![item.clone()])?.is_truthy() {
+                return Ok(KexValue::Boolean(true));
+            }
+        }
+        Ok(KexValue::Boolean(false))
+    }),
+    ("every", "true when all items match a predicate", |rt, a| {
+        let items = need_array(&a, 0, "every")?;
+        for item in &items {
+            if !rt.call_value(arg(&a, 1), vec![item.clone()])?.is_truthy() {
+                return Ok(KexValue::Boolean(false));
+            }
+        }
+        Ok(KexValue::Boolean(true))
+    }),
+    ("sort_by", "sort an array by a key function", |rt, a| {
+        let mut items = need_array(&a, 0, "sort_by")?;
+        let key_fn = arg(&a, 1);
+        let mut keys = Vec::with_capacity(items.len());
+        for item in &items {
+            keys.push(rt.call_value(key_fn.clone(), vec![item.clone()])?);
+        }
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by(|x, y| compare(&keys[*x], &keys[*y]).unwrap_or(std::cmp::Ordering::Equal));
+        items = order.into_iter().map(|i| items[i].clone()).collect();
+        Ok(KexValue::Array(items))
+    }),
+    ("group_by", "group items by a key function", |rt, a| {
+        let items = need_array(&a, 0, "group_by")?;
+        let key_fn = arg(&a, 1);
+        let mut obj = KexObject::new();
+        for item in &items {
+            let key = rt.call_value(key_fn.clone(), vec![item.clone()])?.to_display();
+            let mut group = match obj.get(&key) {
+                Some(KexValue::Array(group)) => group.clone(),
+                _ => Vec::new(),
+            };
+            group.push(item.clone());
+            obj.set(&key, KexValue::Array(group));
+        }
+        Ok(KexValue::Object(obj))
+    }),
+    ("zip", "pair items from two arrays", |_rt, a| {
+        let left = need_array(&a, 0, "zip")?;
+        let right = need_array(&a, 1, "zip")?;
+        let mut out = Vec::new();
+        for i in 0..left.len().min(right.len()) {
+            out.push(KexValue::Array(vec![left[i].clone(), right[i].clone()]));
+        }
+        Ok(KexValue::Array(out))
+    }),
+    ("chunk", "split an array into fixed size chunks", |_rt, a| {
+        let items = need_array(&a, 0, "chunk")?;
+        let size = need_num(&a, 1, "chunk")? as usize;
+        if size == 0 { return Err(error("chunk() needs a positive size")); }
+        Ok(KexValue::Array(items.chunks(size).map(|c| KexValue::Array(c.to_vec())).collect()))
+    }),
+    ("take", "first n items", |_rt, a| {
+        let items = need_array(&a, 0, "take")?;
+        let n = need_num(&a, 1, "take")?.max(0.0) as usize;
+        Ok(KexValue::Array(items.into_iter().take(n).collect()))
+    }),
+    ("drop", "skip the first n items", |_rt, a| {
+        let items = need_array(&a, 0, "drop")?;
+        let n = need_num(&a, 1, "drop")?.max(0.0) as usize;
+        Ok(KexValue::Array(items.into_iter().skip(n).collect()))
+    }),
+    ("first", "first item of an array", |_rt, a| Ok(arg(&need_array(&a, 0, "first")?, 0))),
+    ("last", "last item of an array", |_rt, a| {
+        let items = need_array(&a, 0, "last")?;
+        Ok(items.last().cloned().unwrap_or(KexValue::Null))
+    }),
+    ("avg", "arithmetic mean of an array", |_rt, a| {
+        let items = need_array(&a, 0, "avg")?;
+        if items.is_empty() { return Ok(KexValue::Number(0.0)); }
+        let total: f64 = items.iter().filter_map(|v| v.as_number()).sum();
+        Ok(KexValue::Number(total / items.len() as f64))
+    }),
+    ("min_of", "smallest numeric value in an array", |_rt, a| {
+        let items = need_array(&a, 0, "min_of")?;
+        Ok(KexValue::Number(items.iter().filter_map(|v| v.as_number()).fold(f64::INFINITY, f64::min)))
+    }),
+    ("max_of", "largest numeric value in an array", |_rt, a| {
+        let items = need_array(&a, 0, "max_of")?;
+        Ok(KexValue::Number(items.iter().filter_map(|v| v.as_number()).fold(f64::NEG_INFINITY, f64::max)))
+    }),
+    ("shuffle", "randomly reorder an array", |_rt, a| {
+        let mut items = need_array(&a, 0, "shuffle")?;
+        for i in (1..items.len()).rev() {
+            let j = (pseudo_random() * (i + 1) as f64) as usize;
+            items.swap(i, j);
+        }
+        Ok(KexValue::Array(items))
+    }),
+
+    // ---- objects, extended
+    ("entries", "an object as an array of [key, value] pairs", |_rt, a| {
+        let obj = need_object(&a, 0, "entries")?;
+        Ok(KexValue::Array(obj.entries.into_iter().map(|(k, v)| {
+            KexValue::Array(vec![KexValue::string(k), v])
+        }).collect()))
+    }),
+    ("from_entries", "build an object from [key, value] pairs", |_rt, a| {
+        let items = need_array(&a, 0, "from_entries")?;
+        let mut obj = KexObject::new();
+        for item in items {
+            if let KexValue::Array(pair) = item {
+                if pair.len() >= 2 {
+                    obj.set(&pair[0].to_display(), pair[1].clone());
+                }
+            }
+        }
+        Ok(KexValue::Object(obj))
+    }),
+    ("pick", "keep only the named keys", |_rt, a| {
+        let obj = need_object(&a, 0, "pick")?;
+        let mut out = KexObject::new();
+        for key in need_array(&a, 1, "pick")? {
+            if let Some(value) = obj.get(&key.to_display()) {
+                out.set(&key.to_display(), value.clone());
+            }
+        }
+        Ok(KexValue::Object(out))
+    }),
+    ("omit", "remove the named keys", |_rt, a| {
+        let mut obj = need_object(&a, 0, "omit")?;
+        for key in need_array(&a, 1, "omit")? {
+            obj.remove(&key.to_display());
+        }
+        Ok(KexValue::Object(obj))
+    }),
+    ("invert", "swap the keys and values of an object", |_rt, a| {
+        let obj = need_object(&a, 0, "invert")?;
+        let mut out = KexObject::new();
+        for (key, value) in obj.entries {
+            out.set(&value.to_display(), KexValue::string(key));
+        }
+        Ok(KexValue::Object(out))
+    }),
+    ("deep_get", "read a dot separated path", |_rt, a| {
+        let path = need_str(&a, 1, "deep_get")?;
+        Ok(lookup_path(&arg(&a, 0), &path))
+    }),
+    ("deep_set", "write a dot separated path", |_rt, a| {
+        let path = need_str(&a, 1, "deep_set")?;
+        let mut root = arg(&a, 0);
+        let parts: Vec<&str> = path.split('.').filter(|p| !p.is_empty()).collect();
+        set_path(&mut root, &parts, arg(&a, 2));
+        Ok(root)
+    }),
+
+    // ---- math, extended
+    ("atan", "inverse tangent", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "atan")?.atan()))),
+    ("sinh", "hyperbolic sine", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "sinh")?.sinh()))),
+    ("cosh", "hyperbolic cosine", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "cosh")?.cosh()))),
+    ("tanh", "hyperbolic tangent", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "tanh")?.tanh()))),
+    ("asinh", "inverse hyperbolic sine", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "asinh")?.asinh()))),
+    ("acosh", "inverse hyperbolic cosine", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "acosh")?.acosh()))),
+    ("atanh", "inverse hyperbolic tangent", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "atanh")?.atanh()))),
+    ("hypot", "length of the hypotenuse", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "hypot")?.hypot(need_num(&a, 1, "hypot")?)))),
+    ("cbrt", "cube root", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "cbrt")?.cbrt()))),
+    ("trunc", "truncate towards zero", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "trunc")?.trunc()))),
+    ("degrees", "radians to degrees", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "degrees")?.to_degrees()))),
+    ("radians", "degrees to radians", |_rt, a| Ok(KexValue::Number(need_num(&a, 0, "radians")?.to_radians()))),
+    ("log_base", "logarithm with an explicit base", |_rt, a| {
+        Ok(KexValue::Number(need_num(&a, 0, "log_base")?.log(need_num(&a, 1, "log_base")?)))
+    }),
+    ("round_to", "round to a number of decimal places", |_rt, a| {
+        let value = need_num(&a, 0, "round_to")?;
+        let digits = need_num(&a, 1, "round_to")? as i32;
+        let factor = 10f64.powi(digits);
+        Ok(KexValue::Number((value * factor).round() / factor))
+    }),
+    ("gcd", "greatest common divisor", |_rt, a| {
+        let mut x = need_num(&a, 0, "gcd")?.abs() as i64;
+        let mut y = need_num(&a, 1, "gcd")?.abs() as i64;
+        while y != 0 { let r = x % y; x = y; y = r; }
+        Ok(KexValue::Number(x as f64))
+    }),
+    ("lcm", "least common multiple", |_rt, a| {
+        let x = need_num(&a, 0, "lcm")?.abs() as i64;
+        let y = need_num(&a, 1, "lcm")?.abs() as i64;
+        let mut a = x; let mut b = y;
+        while b != 0 { let r = a % b; a = b; b = r; }
+        Ok(KexValue::Number((x / a.max(1) * y) as f64))
+    }),
+    ("factorial", "factorial of a non negative integer", |_rt, a| {
+        let n = need_num(&a, 0, "factorial")? as u64;
+        if n > 20 { return Err(error("factorial() is limited to 20")); }
+        let mut out = 1u64;
+        for i in 2..=n { out = out.saturating_mul(i); }
+        Ok(KexValue::Number(out as f64))
+    }),
+    ("is_nan", "true when a value is NaN", |_rt, a| {
+        Ok(KexValue::Boolean(arg(&a, 0).as_number().map(|n| n.is_nan()).unwrap_or(false)))
+    }),
+    ("is_infinite", "true when a value is infinite", |_rt, a| {
+        Ok(KexValue::Boolean(arg(&a, 0).as_number().map(|n| n.is_infinite()).unwrap_or(false)))
+    }),
+
+    // ---- time and dates
+    ("sleep", "pause execution for a number of milliseconds", |_rt, a| {
+        let ms = need_num(&a, 0, "sleep")?.max(0.0) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        Ok(KexValue::Boolean(true))
+    }),
+    ("date_now", "current UTC date and time as an object", |_rt, a| {
+        let ms = if a.is_empty() {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
+        } else {
+            need_num(&a, 0, "date_now")?
+        };
+        let p = date_parts(ms);
+        let mut obj = KexObject::new();
+        obj.set("year", KexValue::Number(p.year as f64));
+        obj.set("month", KexValue::Number(p.month as f64));
+        obj.set("day", KexValue::Number(p.day as f64));
+        obj.set("hour", KexValue::Number(p.hour as f64));
+        obj.set("minute", KexValue::Number(p.minute as f64));
+        obj.set("second", KexValue::Number(p.second as f64));
+        obj.set("millis", KexValue::Number(p.millis as f64));
+        obj.set("weekday", KexValue::Number(p.weekday as f64));
+        obj.set("epoch", KexValue::Number(p.epoch));
+        obj.set("iso", KexValue::string(iso_date(&p)));
+        Ok(KexValue::Object(obj))
+    }),
+    ("date_iso", "ISO 8601 UTC timestamp", |_rt, a| {
+        let ms = if a.is_empty() {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
+        } else { need_num(&a, 0, "date_iso")? };
+        Ok(KexValue::string(iso_date(&date_parts(ms))))
+    }),
+    ("date_format", "format a timestamp (YYYY MM DD HH mm ss SSS)", |_rt, a| {
+        let ms = need_num(&a, 0, "date_format")?;
+        let pattern = need_str(&a, 1, "date_format")?;
+        let p = date_parts(ms);
+        let out = pattern
+            .replace("YYYY", &format!("{:04}", p.year))
+            .replace("YY", &format!("{:02}", p.year.rem_euclid(100)))
+            .replace("MM", &format!("{:02}", p.month))
+            .replace("DD", &format!("{:02}", p.day))
+            .replace("HH", &format!("{:02}", p.hour))
+            .replace("mm", &format!("{:02}", p.minute))
+            .replace("ss", &format!("{:02}", p.second))
+            .replace("SSS", &format!("{:03}", p.millis));
+        Ok(KexValue::string(out))
+    }),
+
+    // ---- utilities
+    ("base64_encode", "encode text as base64", |_rt, a| {
+        let text = need_str(&a, 0, "base64_encode")?;
+        Ok(KexValue::string(base64_encode(text.as_bytes())))
+    }),
+    ("base64_decode", "decode base64 text", |_rt, a| {
+        let text = need_str(&a, 0, "base64_decode")?;
+        base64_decode(&text).map(|bytes| KexValue::string(String::from_utf8_lossy(&bytes).to_string()))
+    }),
+    ("uuid", "generate a version 4 UUID", |_rt, _a| Ok(KexValue::string(make_uuid()))),
+    ("hash", "stable 64 bit FNV-1a hash as hex", |_rt, a| {
+        Ok(KexValue::string(format!("{:016x}", fnv1a64(&arg(&a, 0).to_display()))))
+    }),
+
     // ---- host bridge
     ("host", "call a kexco host function", |rt, a| {
         let name = match a.first() {
@@ -823,6 +1674,16 @@ const STRING_METHODS: &[(&str, &str)] = &[
     ("length", "length"),
     ("is_empty", "is_empty"),
     ("empty", "is_empty"),
+    ("title", "title"),
+    ("slug", "slug"),
+    ("trim_start", "trim_start"),
+    ("trimStart", "trim_start"),
+    ("trim_end", "trim_end"),
+    ("trimEnd", "trim_end"),
+    ("replace_all", "replace_all"),
+    ("replaceAll", "replace_all"),
+    ("split_lines", "split_lines"),
+    ("count_of", "count_of"),
 ];
 
 const ARRAY_METHODS: &[(&str, &str)] = &[
@@ -848,6 +1709,24 @@ const ARRAY_METHODS: &[(&str, &str)] = &[
     ("reduce", "reduce"),
     ("clear", "clear_array"),
     ("clone", "clone"),
+    ("concat", "concat"),
+    ("count", "count"),
+    ("some", "some"),
+    ("every", "every"),
+    ("sort_by", "sort_by"),
+    ("sortBy", "sort_by"),
+    ("group_by", "group_by"),
+    ("groupBy", "group_by"),
+    ("zip", "zip"),
+    ("chunk", "chunk"),
+    ("take", "take"),
+    ("drop", "drop"),
+    ("first", "first"),
+    ("last", "last"),
+    ("avg", "avg"),
+    ("min_of", "min_of"),
+    ("max_of", "max_of"),
+    ("shuffle", "shuffle"),
 ];
 
 const OBJECT_METHODS: &[(&str, &str)] = &[
@@ -862,6 +1741,14 @@ const OBJECT_METHODS: &[(&str, &str)] = &[
     ("length", "length"),
     ("is_empty", "is_empty"),
     ("empty", "is_empty"),
+    ("entries", "entries"),
+    ("pick", "pick"),
+    ("omit", "omit"),
+    ("invert", "invert"),
+    ("deep_get", "deep_get"),
+    ("deepGet", "deep_get"),
+    ("deep_set", "deep_set"),
+    ("deepSet", "deep_set"),
 ];
 
 pub fn call_method(

@@ -177,6 +177,38 @@ impl Runtime {
                 Ok(None)
             }
 
+            Statement::LogicalAssign {
+                target, op, value, ..
+            } => {
+                let rhs = self.eval_expr(&value)?;
+                let current = self.eval_target(&target)?;
+                let updated = match op {
+                    LogicalOp::And => {
+                        if current.is_truthy() && rhs.is_truthy() {
+                            rhs
+                        } else {
+                            KexValue::Boolean(false)
+                        }
+                    }
+                    LogicalOp::Or => {
+                        if current.is_truthy() {
+                            current
+                        } else {
+                            rhs
+                        }
+                    }
+                    LogicalOp::Coalesce => {
+                        if matches!(current, KexValue::Null | KexValue::Error(_)) {
+                            rhs
+                        } else {
+                            current
+                        }
+                    }
+                };
+                self.store(target, updated)?;
+                Ok(None)
+            }
+
             Statement::Incr {
                 target, delta, line, ..
             } => {
@@ -353,9 +385,11 @@ impl Runtime {
                 let start = chosen.or(fallback);
                 if let Some(start) = start {
                     for case in &cases[start..] {
-                        match self.exec_block(case.body.clone())? {
-                            Some(v) => return Ok(Some(v)),
-                            None => continue,
+                        match self.exec_block(case.body.clone()) {
+                            Ok(Some(v)) => return Ok(Some(v)),
+                            Ok(None) => continue,
+                            Err(Signal::Break) => break,
+                            Err(other) => return Err(other),
                         }
                     }
                 }
@@ -686,9 +720,13 @@ impl Runtime {
                 for part in parts {
                     match part {
                         StrPart::Lit(text) => out.push_str(text),
-                        StrPart::Code(code, line) => {
+                        StrPart::Code(code, line, spec) => {
                             let expr = compile_fragment(code, *line)?;
-                            out.push_str(&self.eval_expr(&expr)?.to_display());
+                            let value = self.eval_expr(&expr)?;
+                            match spec {
+                                Some(spec) => out.push_str(&builtins::format_spec(&value, spec)),
+                                None => out.push_str(&value.to_display()),
+                            }
                         }
                     }
                 }
@@ -890,7 +928,13 @@ impl Runtime {
                         return self.call_value(stored, argv.split_off(1));
                     }
                 }
-                builtins::call_method(self, name, argv)
+                let result = builtins::call_method(self, name, argv)?;
+                if is_mutating_method(name) {
+                    if let Some(target) = receiver.clone().to_assign_target() {
+                        self.store(target, result.clone())?;
+                    }
+                }
+                Ok(result)
             }
             Expr::Call(callee, args) => {
                 if let Expr::Var(name) = &**callee {
@@ -1148,16 +1192,20 @@ impl Runtime {
         let stem = normalised.trim_end_matches(".kx");
         let mut candidates: Vec<PathBuf> = Vec::new();
 
-        let has_separator = normalised.contains('/');
-        let roots: Vec<PathBuf> = if has_separator {
-            vec![self.script_dir.clone(), crate::pack::pack_dir()]
-        } else {
-            vec![
-                self.script_dir.clone(),
-                crate::pack::pack_dir(),
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ]
-        };
+        let mut roots: Vec<PathBuf> = vec![self.script_dir.clone()];
+
+        for ancestor in self.script_dir.ancestors().skip(1) {
+            if ancestor.file_name().is_none() { break; }
+            roots.push(ancestor.to_path_buf());
+        }
+        if let Ok(current) = std::env::current_dir() {
+            roots.push(current.clone());
+            for ancestor in current.ancestors().skip(1) {
+                if ancestor.file_name().is_none() { break; }
+                roots.push(ancestor.to_path_buf());
+            }
+        }
+        roots.push(crate::pack::pack_dir());
 
         for root in roots {
             candidates.push(root.join(format!("{}.kx", stem)));
@@ -1177,6 +1225,26 @@ impl Runtime {
         candidates.into_iter().find(|c| c.is_file())
     }
 
+}
+
+fn is_mutating_method(name: &str) -> bool {
+    matches!(
+        name,
+        "push"
+            | "pop"
+            | "insert"
+            | "remove"
+            | "remove_at"
+            | "removeAt"
+            | "clear"
+            | "reverse"
+            | "sort"
+            | "flatten"
+            | "unique"
+            | "remove_key"
+            | "removeKey"
+            | "merge"
+    )
 }
 
 pub fn compile(source: &str) -> LexResult<Vec<Statement>> {

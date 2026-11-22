@@ -42,13 +42,13 @@ check("removed value", store_get("name"), null);
 
 // values are always stored as text, so numbers and objects round trip safely
 store_set("list", [1, 2, 3]);
-check("array as text", store_get("list"), "1,2,3");
+check("array as text", store_get("list"), "[1, 2, 3]");
 check("bump 1", bump_counter("visits"), 1);
 check("bump 2", bump_counter("visits"), 2);
 check("bump 3", bump_counter("visits"), 3);
 
 let everything = store_all();
-check("all length", len(everything), 4);
+check("all length", len(everything), 3);
 check("all has visits", has_key(everything, "visits"), true);
 
 // ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ session_remove("tab");
 check("session after remove", session_length(), 0);
 
 // the two stores must not leak into each other
-check("local untouched", store_length(), 4);
+check("local untouched", store_length(), 3);
 
 // ---------------------------------------------------------------------------
 // events

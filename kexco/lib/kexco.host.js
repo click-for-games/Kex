@@ -12,6 +12,7 @@
  *   KEXCO_DOC       path to a JSON file seeding the headless document tree
  *   KEXCO_ROUTES    path to a JSON file of { "GET /url": { status, body } }
  *   KEXCO_STORAGE   path to a JSON file used as the initial localStorage
+ *   KEXCO_ROOT      project root for static files served by the http backend
  *
  * Licensed under MIT.
  */
@@ -22,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const kexco = require(path.join(__dirname, 'kexco.js'));
+const { createServerApi } = require(path.join(__dirname, 'kexco.server.js'));
 
 function loadJson(file, fallback) {
   if (!file) return fallback;
@@ -92,10 +94,13 @@ function buildAdapter() {
 }
 
 const adapter = buildAdapter();
-const library = kexco.buildLibrary(adapter);
+const server = createServerApi({
+  root: process.env.KEXCO_ROOT || path.resolve(__dirname, '..'),
+});
+const library = kexco.buildLibrary(adapter, server);
 
 process.stderr.write(
-  `kexco ${kexco.VERSION} host ready (${adapter.name} adapter, ${require('os').platform()})\n`
+  `kexco ${kexco.VERSION} host ready (${adapter.name} adapter, http backend, ${require('os').platform()})\n`
 );
 
 // ---------------------------------------------------------------------------

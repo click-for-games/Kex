@@ -24,7 +24,7 @@
 
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ===========================================================================
 // 1. VALUE CODEC - identical to the Rust implementation in kex/src/host.rs
@@ -1133,13 +1133,17 @@ const routes = new Map();
 // 4. HOST DISPATCH - maps wire function names onto the adapter
 // ===========================================================================
 
-function buildDispatch(adapter) {
+function buildDispatch(adapter, server) {
   return function dispatch(name, rawArgs) {
     const args = rawArgs.map(decode);
     const a = args;
 
     const need = (n) => {
       if (a.length < n) throw new Error(`${name}: expected ${n} argument(s), received ${a.length}`);
+    };
+    const needServer = () => {
+      if (!server) throw new Error(`${name}: server bridge unavailable; run kexco with the Node host`);
+      return server;
     };
 
     // ---- meta
@@ -1148,11 +1152,14 @@ function buildDispatch(adapter) {
         return { adapter: adapter.name, version: adapter.version, engine: 'kexco' };
       case 'host.version':
         return adapter.version;
-      case 'host.capabilities':
-        return [
+      case 'host.capabilities': {
+        const caps = [
           'dom', 'events', 'storage', 'storage.session', 'timers', 'net',
           'json', 'base64', 'url', 'env', 'text',
         ];
+        if (server) caps.push('server', 'server.static');
+        return caps;
+      }
 
       // ---- dom
       case 'dom.create':
@@ -1351,6 +1358,44 @@ function buildDispatch(adapter) {
         need(1);
         return doFetch('DELETE', a[0]);
 
+      // ---- localhost server
+      case 'server.listen':
+        return needServer().listen(a[0], a[1]);
+      case 'server.close':
+        return needServer().close();
+      case 'server.running':
+        return needServer().running();
+      case 'server.address':
+        return needServer().address();
+      case 'server.route':
+        need(3);
+        return needServer().route(a[0], a[1], a[2]);
+      case 'server.unroute':
+        need(2);
+        return needServer().unroute(a[0], a[1]);
+      case 'server.routes':
+        return needServer().routes();
+      case 'server.static':
+        return needServer().static(a[0] === undefined ? 'public' : a[0], a[1]);
+      case 'server.staticInfo':
+        return needServer().staticInfo();
+      case 'server.drain':
+        return needServer().drain();
+      case 'server.pending':
+        return needServer().pendingCount();
+      case 'server.respond':
+        need(3);
+        return needServer().respond(a[0], a[1], a[2], a[3] || {});
+      case 'server.wait':
+        return needServer().wait(a[0] === undefined ? 50 : a[0]);
+      case 'server.simulate':
+        need(2);
+        return needServer().simulate(a[0], a[1], a[2], a[3]);
+      case 'server.lastResponse':
+        return needServer().lastResponse();
+      case 'server.requests':
+        return needServer().requests();
+
       // ---- utilities
       case 'json.parse':
         need(1);
@@ -1421,10 +1466,11 @@ function buildDispatch(adapter) {
 // 5. PUBLIC ENTRY POINTS
 // ===========================================================================
 
-function buildLibrary(adapter) {
-  const dispatch = buildDispatch(adapter);
+function buildLibrary(adapter, server) {
+  const dispatch = buildDispatch(adapter, server);
   return {
     VERSION,
+    server: server || null,
     adapter: adapter.name,
     encode,
     decode,

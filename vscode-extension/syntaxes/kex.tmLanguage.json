@@ -2,37 +2,116 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Kex",
   "patterns": [
-    {
-      "name": "comment.line.double-slash.kex",
-      "match": "//.*$"
-    },
-    {
-      "name": "comment.block.kex",
-      "begin": "/\\*",
-      "end": "\\*/"
-    },
-    {
-      "name": "string.quoted.single.kex",
-      "begin": "'",
-      "end": "'"
-    },
-    {
-      "name": "string.quoted.double.kex",
-      "begin": "\"",
-      "end": "\""
-    },
+    { "include": "#comments" },
+    { "include": "#strings" },
     {
       "name": "keyword.control.kex",
-      "match": "\\b(let|if|else|while|fn|return|kxout|kxin|len|cast|syscall)\\b"
+      "match": "\\b(?:if|elif|else|switch|case|default|for|in|while|do|break|continue|return|try|catch|finally|import|export)\\b"
     },
     {
-      "name": "constant.language.boolean.kex",
-      "match": "\\b(true|false)\\b"
+      "name": "storage.type.kex",
+      "match": "\\b(?:let|const|fn)\\b"
+    },
+    {
+      "name": "storage.modifier.kex",
+      "match": "\\b(?:kxout|kxin|kxsys|syscall|host)\\b"
+    },
+    {
+      "name": "constant.language.kex",
+      "match": "\\b(?:true|false|null)\\b"
     },
     {
       "name": "constant.numeric.kex",
-      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+      "match": "\\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9]+)?)\\b"
+    },
+    {
+      "name": "keyword.operator.assignment.kex",
+      "match": "\\+\\+|--|\\+=|-=|\\*=|/=|%=|&&=|\\|\\|=|\\?\\?=|="
+    },
+    {
+      "name": "keyword.operator.kex",
+      "match": "&&|\\|\\||\\?\\?|==|!=|<=|>=|=>|\\.\\.=|\\.\\.|[+\\-*/%<>=!&|^~?:]"
+    },
+    {
+      "name": "support.function.builtin.kex",
+      "match": "\\b(?:print|kxout|eprint|kxin|input|readline|readnumber|type_of|to_str|to_num|to_int|to_bool|to_array|cast|is_null|deep_equal|error|assert|exit|host_ready|host_env|len|length|keys|values|has_key|remove_key|merge|object|upper|lower|trim|split|join|replace|contains|starts_with|ends_with|repeat|index_of|slice|char_at|chars|pad_start|pad_end|format|parse_num|title|slug|camel|snake|kebab|trim_start|trim_end|replace_all|split_lines|count_of|is_alpha|is_digit|is_alnum|is_space|quote|unquote|push|pop|insert|remove_at|reverse|sort|sum|flatten|unique|map|filter|find|reduce|concat|count|some|every|sort_by|group_by|zip|chunk|take|drop|first|last|avg|min_of|max_of|shuffle|entries|from_entries|pick|omit|invert|deep_get|deep_set|json_parse|json_stringify|json_pretty|json_get|json_set|file_read|file_write|file_append|file_exists|file_delete|file_copy|file_move|file_list|file_mkdir|file_meta|file_name|file_ext|file_dir|path_join|path_abs|cwd|env_get|env_set|abs|floor|ceil|round|sqrt|pow|exp|log|log2|log10|sin|cos|tan|atan|atan2|sinh|cosh|tanh|hypot|cbrt|trunc|degrees|radians|log_base|round_to|gcd|lcm|factorial|is_nan|is_infinite|min|max|clamp|sign|random|range|now|sleep|date_now|date_iso|date_format|base64_encode|base64_decode|uuid|hash)\\b"
+    },
+    {
+      "name": "support.function.kexco.kex",
+      "match": "\\b(?:create|query|query_or_null|query_all|query_count|element|append|prepend|remove|set_text|get_text|set_html|get_html|set_attr|get_attr|remove_attr|has_attr|add_class|remove_class|has_class|set_style|get_style|set_data|get_data|tag_of|id_of|children|title|set_title|ready_state|body|document|on|off|fire|fired_events|pump|tick|timer_start|timer_cancel|pending_timers|store_set|store_get|store_remove|store_clear|store_length|store_key|store_all|session_set|session_get|session_remove|session_clear|session_length|route|routes|get|post|put|del|server_listen|server_close|server_running|server_address|server_route|server_unroute|server_routes|server_static|server_static_info|server_wait|server_pump|server_run|server_respond|server_requests|server_last_response|server_pending|server_simulate|json_response|html_response|capabilities|render_list|bump_counter)\\b"
+    },
+    {
+      "name": "support.function.method.kex",
+      "match": "(?<=\\.)(?:len|length|title|slug|trim_start|trimStart|trim_end|trimEnd|replace_all|replaceAll|split_lines|count_of|concat|count|some|every|sort_by|sortBy|group_by|groupBy|zip|chunk|take|drop|first|last|avg|min_of|max_of|shuffle|entries|pick|omit|invert|deep_get|deepGet|deep_set|deepSet|push|pop|insert|remove_at|removeAt|clear|reverse|sort|flatten|unique|remove_key|removeKey|merge|keys|values|has_key|hasKey|map|filter|find|reduce|join|slice|upper|lower|trim|contains|starts_with|startsWith|ends_with|endsWith|repeat|index_of|indexOf|char_at|charAt|pad_start|padStart|pad_end|padEnd|is_empty|empty)\\b"
     }
   ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.kex",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.kex",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.kex",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.kex",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.template.kex",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.kex",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.kex",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.template.multiline.kex",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            {
+              "name": "constant.character.escape.kex",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.kex",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
   "scopeName": "source.kx"
 }

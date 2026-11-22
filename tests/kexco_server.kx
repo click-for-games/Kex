@@ -1,0 +1,71 @@
+// kexco tester: localhost http backend
+//
+//   kex tests/kexco_server.kx
+
+import "kexco";
+
+let checks = 0;
+let failures = 0;
+
+fn check(label, actual, expected) {
+    checks = checks + 1;
+    if (actual == expected) {
+        print("  ok    ", label);
+    } else {
+        failures = failures + 1;
+        print("  FAIL  ", label, " got ", actual, " want ", expected);
+    }
+}
+
+print("kexco ", kexco_version, " server on the ", kexco_adapter, " adapter");
+
+check("not listening", server_running(), false);
+check("static default", server_static_info().prefix, "/");
+
+server_static("public", "/");
+
+server_route("GET", "/api/hello/:name", (request) => {
+    return json_response({
+        "ok": true,
+        "path": request.path,
+        "name": request.params.name
+    });
+});
+
+server_route("POST", "/api/echo", (request) => {
+    return {
+        "status": 201,
+        "body": request.body,
+        "headers": { "Content-Type": "text/plain" }
+    };
+});
+
+check("routes registered", len(server_routes()), 2);
+check("route path", server_routes()[0], "GET /api/hello/:name");
+
+let hello_id = server_simulate("GET", "/api/hello/Kex");
+check("request queued", server_pending(), 1);
+check("pump ran", server_pump(), 1);
+check("queue empty", server_pending(), 0);
+
+let hello = server_last_response();
+check("hello status", hello.status, 200);
+check("hello json ok", json_parse(hello.body).ok, true);
+check("hello json name", json_parse(hello.body).name, "Kex");
+
+let echo_id = server_simulate("POST", "/api/echo", "ping");
+check("echo queued", server_pending(), 1);
+check("echo pump", server_pump(), 1);
+let echo = server_last_response();
+check("echo status", echo.status, 201);
+check("echo body", echo.body, "ping");
+check("echo content type", echo.headers["Content-Type"], "text/plain");
+
+check("request log", len(server_requests()), 2);
+check("log method", server_requests()[0].method, "GET");
+
+print("");
+print(checks - failures, "/", checks, " server checks passed");
+if (failures > 0) {
+    error("kexco server tester failed");
+}

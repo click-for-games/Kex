@@ -277,9 +277,13 @@ impl Parser {
                 let mut binding = None;
                 let mut handler = Vec::new();
                 if self.eat(&TokenKind::Catch) {
+                    let paren = self.eat(&TokenKind::LParen);
                     if let TokenKind::Identifier(name) = self.peek_kind().clone() {
                         self.advance();
                         binding = Some(name);
+                    }
+                    if paren {
+                        self.expect(TokenKind::RParen)?;
                     }
                     handler = self.parse_block()?;
                 }
@@ -453,12 +457,20 @@ impl Parser {
     }
 
     fn parse_for(&mut self, line: usize) -> LexResult<Statement> {
+        let parenthesised = self.at(&TokenKind::LParen);
+        if parenthesised {
+            self.advance();
+        }
+
         // for x in iterable { ... }
         if let TokenKind::Identifier(name) = self.peek_kind().clone() {
             if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::In) {
                 self.advance();
                 self.advance();
                 let iterable = self.parse_expr()?;
+                if parenthesised {
+                    self.expect(TokenKind::RParen)?;
+                }
                 let body = self.parse_block()?;
                 return Ok(Statement::ForIn {
                     name,
@@ -490,32 +502,29 @@ impl Parser {
         };
         self.expect(TokenKind::Semicolon)?;
 
-        let step = if self.at(&TokenKind::LBrace) {
+        let step = if self.at(&TokenKind::LBrace) || (parenthesised && self.at(&TokenKind::RParen)) {
             None
         } else {
-            let name = self.expect_ident()?;
             let step_line = self.line();
-            let value = match self.peek_kind() {
-                TokenKind::PlusPlus => {
-                    self.advance();
-                    Expr::Literal(KexValue::Number(1.0))
-                }
-                TokenKind::MinusMinus => {
-                    self.advance();
-                    Expr::Literal(KexValue::Number(-1.0))
-                }
-                _ => {
-                    self.expect(TokenKind::Assign)?;
-                    self.parse_expr()?
-                }
-            };
-            Some(Box::new(Statement::Assign {
-                target: AssignTarget::Name(name),
-                value,
-                line: step_line,
-            }))
+            let statement = self.parse_statement()?;
+            if !matches!(
+                statement,
+                Statement::Assign { .. }
+                    | Statement::CompoundAssign { .. }
+                    | Statement::LogicalAssign { .. }
+                    | Statement::Incr { .. }
+                    | Statement::ExprStmt { .. }
+            ) {
+                return self.err("'for' step must be an assignment or increment");
+            }
+            self.eat(&TokenKind::Semicolon);
+            let _ = step_line;
+            Some(Box::new(statement))
         };
 
+        if parenthesised {
+            self.expect(TokenKind::RParen)?;
+        }
         let body = self.parse_block()?;
         Ok(Statement::ForClassic {
             init,
@@ -569,13 +578,37 @@ impl Parser {
             | TokenKind::MinusAssign
             | TokenKind::StarAssign
             | TokenKind::SlashAssign
-            | TokenKind::PercentAssign => {
+            | TokenKind::PercentAssign
+            | TokenKind::AndAssign
+            | TokenKind::OrAssign
+            | TokenKind::CoalesceAssign => {
+                if matches!(
+                    next,
+                    TokenKind::AndAssign | TokenKind::OrAssign | TokenKind::CoalesceAssign
+                ) {
+                    let op = match next {
+                        TokenKind::AndAssign => LogicalOp::And,
+                        TokenKind::OrAssign => LogicalOp::Or,
+                        _ => LogicalOp::Coalesce,
+                    };
+                    self.advance();
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    self.eat_semicolon();
+                    return Ok(Statement::LogicalAssign {
+                        target: AssignTarget::Name(name),
+                        op,
+                        value,
+                        line,
+                    });
+                }
                 let op = match next {
                     TokenKind::PlusAssign => BinOp::Add,
                     TokenKind::MinusAssign => BinOp::Sub,
                     TokenKind::StarAssign => BinOp::Mul,
                     TokenKind::SlashAssign => BinOp::Div,
-                    _ => BinOp::Rem,
+                    TokenKind::PercentAssign => BinOp::Rem,
+                    _ => BinOp::BitAnd,
                 };
                 self.advance();
                 self.advance();
@@ -611,7 +644,10 @@ impl Parser {
                         | TokenKind::StarAssign
                         | TokenKind::SlashAssign
                         | TokenKind::PercentAssign
-                ) {
+                        | TokenKind::AndAssign
+                        | TokenKind::OrAssign
+                        | TokenKind::CoalesceAssign
+                 ) {
                     let op_kind = self.advance().kind;
                     let target = match expr.to_assign_target() {
                         Some(target) => target,
@@ -626,12 +662,31 @@ impl Parser {
                             line,
                         });
                     }
+                    if matches!(
+                        op_kind,
+                        TokenKind::AndAssign | TokenKind::OrAssign | TokenKind::CoalesceAssign
+                    ) {
+                        let op = match op_kind {
+                            TokenKind::AndAssign => LogicalOp::And,
+                            TokenKind::OrAssign => LogicalOp::Or,
+                            _ => LogicalOp::Coalesce,
+                        };
+                        let value = self.parse_expr()?;
+                        self.eat_semicolon();
+                        return Ok(Statement::LogicalAssign {
+                            target,
+                            op,
+                            value,
+                            line,
+                        });
+                    }
                     let op = match op_kind {
                         TokenKind::PlusAssign => BinOp::Add,
                         TokenKind::MinusAssign => BinOp::Sub,
                         TokenKind::StarAssign => BinOp::Mul,
                         TokenKind::SlashAssign => BinOp::Div,
-                        _ => BinOp::Rem,
+                        TokenKind::PercentAssign => BinOp::Rem,
+                        _ => BinOp::BitAnd,
                     };
                     let value = self.parse_expr()?;
                     self.eat_semicolon();
@@ -1086,10 +1141,19 @@ impl Parser {
                 self.advance();
                 let mut entries = Vec::new();
                 while !self.at(&TokenKind::RBrace) {
-                    let key = match self.advance().kind {
-                        TokenKind::Identifier(name) => name,
-                        TokenKind::Str(s) => s,
-                        TokenKind::Number(n) => crate::value::format_number(n),
+                    let key = match self.peek_kind().clone() {
+                        TokenKind::Identifier(name) => {
+                            self.advance();
+                            name
+                        }
+                        TokenKind::Str(s) => {
+                            self.advance();
+                            s
+                        }
+                        TokenKind::Number(n) => {
+                            self.advance();
+                            crate::value::format_number(n)
+                        }
                         other => {
                             return Err(KexError::new(
                                 "Parser",
@@ -1099,8 +1163,14 @@ impl Parser {
                             ))
                         }
                     };
-                    self.expect(TokenKind::Colon)?;
-                    let value = self.parse_expr()?;
+                    let value = if self.eat(&TokenKind::Colon) {
+                        self.parse_expr()?
+                    } else if self.at(&TokenKind::Comma) || self.at(&TokenKind::RBrace) {
+                        // object shorthand: { name } means { name: name }
+                        Expr::Var(key.clone())
+                    } else {
+                        return self.err("expected ':' after object key");
+                    };
                     entries.push((key, value));
                     if !self.eat(&TokenKind::Comma) {
                         break;

@@ -1,0 +1,25 @@
+import "kexco";
+
+let port = env_get("KEX_PORT") == null ? 8080 : parse_num(env_get("KEX_PORT"));
+let bind_host = env_get("KEX_HOST") == null ? "127.0.0.1" : env_get("KEX_HOST");
+
+server_static("public", "/");
+
+server_route("GET", "/api/hello", (request) => {
+    return json_response({
+        "ok": true,
+        "message": "Hello from Kex",
+        "path": request.path
+    });
+});
+
+server_route("POST", "/api/echo", (request) => {
+    return json_response({
+        "ok": true,
+        "echo": request.body
+    });
+});
+
+let bound = server_listen(port, bind_host);
+kxout("Kex web server listening on http://" + bound.address);
+server_run(50);

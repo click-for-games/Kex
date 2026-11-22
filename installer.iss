@@ -11,6 +11,13 @@ PrivilegesRequired=admin
 [Files]
 ; Core Executable
 Source: "kex\target\release\kex.exe"; DestDir: "{app}"; Flags: ignoreversion
+; kexco web library and localhost backend
+Source: "kexco\kexco.kx"; DestDir: "{app}\kexco"; Flags: ignoreversion
+Source: "kexco\lib\*"; DestDir: "{app}\kexco\lib"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Starter website
+Source: "examples\webapp\*"; DestDir: "{app}\examples\webapp"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Protocol documentation
+Source: "docs\PROTOCOL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 ; VS Code Extension Package
 Source: "vscode-extension\kex-lang-1.0.0.vsix"; DestDir: "{app}"; Flags: ignoreversion
 

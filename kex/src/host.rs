@@ -117,20 +117,36 @@ pub fn attach(search_dirs: &[PathBuf]) -> Option<HostBridge> {
     None
 }
 
+fn clean_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn spawn_host(script: &Path) -> Option<HostBridge> {
+    let script = clean_path(script);
+    let script = script.as_path();
     let runtime = if cfg!(target_os = "windows") {
         "node"
     } else {
         "node"
     };
 
-    let mut child = Command::new(runtime)
+    let mut command = Command::new(runtime);
+    command
         .arg(script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::inherit());
+    if std::env::var("KEXCO_ROOT").is_err() {
+        if let Some(root) = script.parent().and_then(Path::parent) {
+            command.env("KEXCO_ROOT", root);
+        }
+    }
+    let mut child = command.spawn().ok()?;
 
     let stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;

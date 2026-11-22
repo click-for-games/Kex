@@ -69,10 +69,18 @@ impl UnOp {
 }
 
 /// One piece of an interpolated string literal: raw text or embedded source.
+/// The third field holds an optional format specifier (`{n:04}`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     Lit(String),
-    Code(String, usize),
+    Code(String, usize, Option<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogicalOp {
+    And,
+    Or,
+    Coalesce,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +159,12 @@ pub enum Statement {
     CompoundAssign {
         target: AssignTarget,
         op: BinOp,
+        value: Expr,
+        line: usize,
+    },
+    LogicalAssign {
+        target: AssignTarget,
+        op: LogicalOp,
         value: Expr,
         line: usize,
     },
@@ -252,6 +266,7 @@ impl Statement {
             Statement::Let { line, .. }
             | Statement::Assign { line, .. }
             | Statement::CompoundAssign { line, .. }
+            | Statement::LogicalAssign { line, .. }
             | Statement::Incr { line, .. }
             | Statement::KxOut { line, .. }
             | Statement::SysCall { line, .. }

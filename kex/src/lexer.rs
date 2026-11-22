@@ -65,6 +65,9 @@ pub enum TokenKind {
     StarAssign,
     SlashAssign,
     PercentAssign,
+    AndAssign,
+    OrAssign,
+    CoalesceAssign,
     PlusPlus,
     MinusMinus,
     Eq,
@@ -150,7 +153,68 @@ fn keyword_name(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::True => "true",
         TokenKind::False => "false",
         TokenKind::Null => "null",
-        _ => return None,
+        TokenKind::ReadLine => "readline",
+        TokenKind::ReadNumber => "readnumber",
+        TokenKind::Print => "print",
+        TokenKind::Write => "kxwrite",
+        TokenKind::EPrint => "eprint",
+        TokenKind::Clear => "kxclear",
+        TokenKind::SysRun => "syscall",
+        TokenKind::Len => "len",
+        TokenKind::Cast => "cast",
+        TokenKind::Random => "random",
+        TokenKind::Now => "now",
+        TokenKind::Plus => "+",
+        TokenKind::Minus => "-",
+        TokenKind::Star => "*",
+        TokenKind::Slash => "/",
+        TokenKind::Percent => "%",
+        TokenKind::Pow => "**",
+        TokenKind::Assign => "=",
+        TokenKind::PlusAssign => "+=",
+        TokenKind::MinusAssign => "-=",
+        TokenKind::StarAssign => "*=",
+        TokenKind::SlashAssign => "/=",
+        TokenKind::PercentAssign => "%=",
+        TokenKind::AndAssign => "&&=",
+        TokenKind::OrAssign => "||=",
+        TokenKind::CoalesceAssign => "??=",
+        TokenKind::PlusPlus => "++",
+        TokenKind::MinusMinus => "--",
+        TokenKind::Eq => "==",
+        TokenKind::Ne => "!=",
+        TokenKind::Lt => "<",
+        TokenKind::Gt => ">",
+        TokenKind::Le => "<=",
+        TokenKind::Ge => ">=",
+        TokenKind::And => "&&",
+        TokenKind::Or => "||",
+        TokenKind::Bang => "!",
+        TokenKind::Question => "?",
+        TokenKind::Coalesce => "??",
+        TokenKind::Amp => "&",
+        TokenKind::Pipe => "|",
+        TokenKind::Caret => "^",
+        TokenKind::Tilde => "~",
+        TokenKind::Shl => "<<",
+        TokenKind::Shr => ">>",
+        TokenKind::Dot => ".",
+        TokenKind::DotDot => "..",
+        TokenKind::DotDotEq => "..=",
+        TokenKind::FatArrow => "=>",
+        TokenKind::LParen => "(",
+        TokenKind::RParen => ")",
+        TokenKind::LBrace => "{",
+        TokenKind::RBrace => "}",
+        TokenKind::LBracket => "[",
+        TokenKind::RBracket => "]",
+        TokenKind::Comma => ",",
+        TokenKind::Semicolon => ";",
+        TokenKind::Colon => ":",
+        TokenKind::Eof => "end of file",
+        TokenKind::Identifier(_) | TokenKind::Number(_) | TokenKind::Str(_) | TokenKind::StrTemplate(_) => {
+            return None
+        }
     })
 }
 
@@ -388,19 +452,39 @@ impl<'a> Lexer<'a> {
                 }
                 '&' => {
                     self.bump(&chars);
-                    if self.peek_at(&chars, 0) == '&' {
+                    let kind = if self.peek_at(&chars, 0) == '&' {
                         self.bump(&chars);
-                    }
-                    tokens.push(Token { kind: TokenKind::And, line, col });
+                        if self.peek_at(&chars, 0) == '=' {
+                            self.bump(&chars);
+                            TokenKind::AndAssign
+                        } else {
+                            TokenKind::And
+                        }
+                    } else if self.peek_at(&chars, 0) == '=' {
+                        self.bump(&chars);
+                        TokenKind::AndAssign
+                    } else {
+                        TokenKind::Amp
+                    };
+                    tokens.push(Token { kind, line, col });
                 }
                 '|' => {
                     self.bump(&chars);
-                    if self.peek_at(&chars, 0) == '|' {
+                    let kind = if self.peek_at(&chars, 0) == '|' {
                         self.bump(&chars);
-                        tokens.push(Token { kind: TokenKind::Or, line, col });
+                        if self.peek_at(&chars, 0) == '=' {
+                            self.bump(&chars);
+                            TokenKind::OrAssign
+                        } else {
+                            TokenKind::Or
+                        }
+                    } else if self.peek_at(&chars, 0) == '=' {
+                        self.bump(&chars);
+                        TokenKind::OrAssign
                     } else {
-                        tokens.push(Token { kind: TokenKind::Pipe, line, col });
-                    }
+                        TokenKind::Pipe
+                    };
+                    tokens.push(Token { kind, line, col });
                 }
                 '^' => {
                     self.bump(&chars);
@@ -413,7 +497,12 @@ impl<'a> Lexer<'a> {
                     self.bump(&chars);
                     let kind = if self.peek_at(&chars, 0) == '?' {
                         self.bump(&chars);
-                        TokenKind::Coalesce
+                        if self.peek_at(&chars, 0) == '=' {
+                            self.bump(&chars);
+                            TokenKind::CoalesceAssign
+                        } else {
+                            TokenKind::Coalesce
+                        }
                     } else {
                         TokenKind::Question
                     };
@@ -433,8 +522,8 @@ impl<'a> Lexer<'a> {
                     }
                     tokens.push(Token { kind, line, col });
                 }
-                '\'' | '"' => {
-                    let parts = self.read_string(&chars, ch, false)?;
+                '\'' | '"' | '`' => {
+                    let parts = self.read_string(&chars, ch, ch == '`')?;
                     let kind = if parts.len() == 1 {
                         match &parts[0] {
                             StrPart::Lit(text) => TokenKind::Str(text.clone()),
@@ -602,13 +691,13 @@ impl<'a> Lexer<'a> {
         &mut self,
         chars: &[char],
         quote: char,
-        force_template: bool,
+        multiline: bool,
     ) -> LexResult<Vec<StrPart>> {
         let (line, col) = (self.line, self.col);
         self.bump(chars); // opening quote
         let mut parts: Vec<StrPart> = Vec::new();
         let mut text = String::new();
-        let templated = force_template || quote == '"';
+        let templated = multiline || quote == '"';
 
         loop {
             if self.pos >= chars.len() {
@@ -641,6 +730,7 @@ impl<'a> Lexer<'a> {
                     '\\' => '\\',
                     '\'' => '\'',
                     '"' => '"',
+                    '`' => '`',
                     '{' => '{',
                     '}' => '}',
                     other => {
@@ -667,6 +757,7 @@ impl<'a> Lexer<'a> {
                 let code_start = self.pos;
                 let code_line = self.line;
                 let mut depth = 1usize;
+                let mut spec_start: Option<usize> = None;
                 while self.pos < chars.len() {
                     let ic = self.peek_at(chars, 0);
                     if ic == '{' {
@@ -676,7 +767,9 @@ impl<'a> Lexer<'a> {
                         if depth == 0 {
                             break;
                         }
-                    } else if ic == '"' || ic == '\'' {
+                    } else if ic == ':' && depth == 1 && spec_start.is_none() {
+                        spec_start = Some(self.pos);
+                    } else if ic == '"' || ic == '\'' || ic == '`' {
                         // skip nested strings so their braces are ignored
                         let nested = ic;
                         self.bump(chars);
@@ -697,12 +790,14 @@ impl<'a> Lexer<'a> {
                         "unterminated '{' interpolation",
                     ));
                 }
-                let code: String = chars[code_start..self.pos].iter().collect();
+                let code_end = spec_start.unwrap_or(self.pos);
+                let code: String = chars[code_start..code_end].iter().collect();
+                let spec = spec_start.map(|at| chars[at + 1..self.pos].iter().collect::<String>());
                 self.bump(chars); // consume '}'
                 if !text.is_empty() {
                     parts.push(StrPart::Lit(std::mem::take(&mut text)));
                 }
-                parts.push(StrPart::Code(code, code_line));
+                parts.push(StrPart::Code(code, code_line, spec));
                 continue;
             }
 
@@ -713,12 +808,12 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            if c == '\n' {
+            if c == '\n' && !multiline {
                 return Err(KexError::new(
                     "Lexer",
                     line,
                     col,
-                    "newline inside string literal",
+                    "newline inside string literal (use a backtick template for multiple lines)",
                 ));
             }
 

@@ -1,3 +1,4 @@
+use crate::value::{KexObject, KexValue};
 use std::fmt::Write as _;
 
 // ============================================================================
@@ -106,6 +107,42 @@ impl Json {
         let value = p.value()?;
         p.skip_ws();
         Ok(value)
+    }
+}
+
+pub fn from_value(value: &KexValue) -> Json {
+    match value {
+        KexValue::Null | KexValue::Error(_) | KexValue::Func(_) | KexValue::Builtin(_) => Json::Null,
+        KexValue::Boolean(b) => Json::Bool(*b),
+        KexValue::Number(n) => {
+            if n.is_finite() { Json::Num(*n) } else { Json::Null }
+        }
+        KexValue::String(s) => Json::Str(s.clone()),
+        KexValue::Array(items) => Json::Arr(items.iter().map(from_value).collect()),
+        KexValue::Object(obj) => Json::Obj(
+            obj.entries
+                .iter()
+                .map(|(k, v)| (k.clone(), from_value(v)))
+                .collect(),
+        ),
+        KexValue::Range(r) => Json::Arr(r.to_array().iter().map(from_value).collect()),
+    }
+}
+
+pub fn to_value(json: &Json) -> KexValue {
+    match json {
+        Json::Null => KexValue::Null,
+        Json::Bool(b) => KexValue::Boolean(*b),
+        Json::Num(n) => KexValue::Number(*n),
+        Json::Str(s) => KexValue::String(s.clone()),
+        Json::Arr(items) => KexValue::Array(items.iter().map(to_value).collect()),
+        Json::Obj(entries) => {
+            let mut obj = KexObject::new();
+            for (k, v) in entries {
+                obj.set(k, to_value(v));
+            }
+            KexValue::Object(obj)
+        }
     }
 }
 

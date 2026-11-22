@@ -15,6 +15,8 @@ if (!host_ready()) {
 
 let kexco_next_handler = 1;
 let kexco_handlers = {};
+let kexco_timers = {};
+let kexco_timer_ids = {};
 
 export kexco_version = host('host.version');
 export kexco_info = host('host.info');
@@ -238,14 +240,21 @@ fn timer_start(delay_ms, handler) {
     let id = kexco_next_handler;
     kexco_next_handler = kexco_next_handler + 1;
     kexco_handlers[id] = { "type": "timer", "fn": handler, "node": null };
-    host("timers.set", delay_ms);
+    let host_id = host("timers.set", delay_ms);
+    kexco_timers[host_id] = { "handler": id, "detail": delay_ms };
+    kexco_timer_ids[id] = host_id;
     return id;
 }
 
 fn timer_cancel(handler_id) {
     let record = kexco_handlers[handler_id];
     if (record == null) { return null; }
-    host("timers.clear", handler_id);
+    let host_id = kexco_timer_ids[handler_id];
+    if (host_id != null) {
+        host("timers.clear", host_id);
+        kexco_timers[host_id] = null;
+        kexco_timer_ids[handler_id] = null;
+    }
     kexco_handlers[handler_id] = null;
     return null;
 }
@@ -253,8 +262,18 @@ fn timer_cancel(handler_id) {
 // Advances the deterministic clock, then drains timers and events.
 fn tick(ms) {
     let fired = host("timers.tick", ms);
-    let ran = pump();
-    return len(fired) + ran;
+    let ran = 0;
+    for host_id in fired {
+        let timer = kexco_timers[host_id];
+        if (timer == null) { continue; }
+        let record = kexco_handlers[timer.handler];
+        if (record == null) { continue; }
+        record.fn({ "type": "timer", "handler": timer.handler, "detail": timer.detail });
+        kexco_timers[host_id] = null;
+        kexco_timer_ids[timer.handler] = null;
+        ran = ran + 1;
+    }
+    return ran + pump();
 }
 
 fn pending_timers() {
@@ -340,6 +359,137 @@ fn put(url, body) {
 
 fn del(url) {
     return host("net.delete", url);
+}
+
+// ---------------------------------------------------------------------------
+// localhost http server
+// ---------------------------------------------------------------------------
+
+// Starts a real localhost listener in the Node host. Returns the bound
+// address as { "host": "...", "port": 8080, "address": "127.0.0.1:8080" }.
+fn server_listen(port, host_name) {
+    return host("server.listen", port, host_name);
+}
+
+fn server_close() {
+    return host("server.close");
+}
+
+fn server_running() {
+    return host("server.running");
+}
+
+fn server_address() {
+    return host("server.address");
+}
+
+// Registers a Kex function for "METHOD /path". Paths may use :name segments.
+// The handler receives one request object and returns a response object with
+// optional "status", "body" and "headers" fields, or a plain string body.
+fn server_route(method, path, handler) {
+    let id = kexco_next_handler;
+    kexco_next_handler = kexco_next_handler + 1;
+    kexco_handlers[id] = { "type": "server", "fn": handler, "node": null };
+    host("server.route", method, path, id);
+    return path;
+}
+
+fn server_unroute(method, path) {
+    return host("server.unroute", method, path);
+}
+
+fn server_routes() {
+    return host("server.routes");
+}
+
+// Serves files from a directory. The default is ./public under KEXCO_ROOT.
+fn server_static(directory, prefix) {
+    return host("server.static", directory, prefix);
+}
+
+fn server_static_info() {
+    return host("server.staticInfo");
+}
+
+// Waits up to ms for an incoming request and returns the number queued.
+// Node owns the socket; this keeps the script cooperative instead of blocking.
+fn server_wait(ms) {
+    return host("server.wait", ms);
+}
+
+// Runs every queued request through its Kex handler and sends the response.
+fn server_pump() {
+    let queue = host("server.drain");
+    let ran = 0;
+    for request in queue {
+        let record = kexco_handlers[request.handler];
+        if (record == null) {
+            host("server.respond", request.id, 500, "no handler for " + request.path, { "Content-Type": "text/plain; charset=utf-8" });
+            continue;
+        }
+        let response = record.fn(request);
+        if (response == null) { continue; }
+        let status = 200;
+        let body = "";
+        let headers = {};
+        if (type_of(response) == "object") {
+            if (response.status != null) { status = response.status; }
+            if (response.body != null) { body = response.body; }
+            if (response.headers != null) { headers = response.headers; }
+        } else {
+            body = response;
+        }
+        host("server.respond", request.id, status, body, headers);
+        ran = ran + 1;
+    }
+    return ran;
+}
+
+// Convenience loop for `kex serve`: wait, dispatch, repeat until closed.
+fn server_run(ms) {
+    let delay = ms == null ? 50 : ms;
+    while server_running() {
+        server_wait(delay);
+        server_pump();
+    }
+    return 0;
+}
+
+fn server_respond(request_id, status, body, headers) {
+    return host("server.respond", request_id, status, body, headers == null ? {} : headers);
+}
+
+fn server_requests() {
+    return host("server.requests");
+}
+
+fn server_last_response() {
+    return host("server.lastResponse");
+}
+
+fn server_pending() {
+    return host("server.pending");
+}
+
+fn json_response(body, status) {
+    return {
+        "status": status == null ? 200 : status,
+        "body": body,
+        "headers": { "Content-Type": "application/json; charset=utf-8" }
+    };
+}
+
+fn html_response(body, status) {
+    return {
+        "status": status == null ? 200 : status,
+        "body": body,
+        "headers": { "Content-Type": "text/html; charset=utf-8" }
+    };
+}
+
+// Injects a request without opening a socket, for deterministic backend tests.
+fn server_simulate(method, path, body, headers) {
+    return host("server.simulate", method, path, body, headers == null ? {} : headers);
 }
 
 // ---------------------------------------------------------------------------

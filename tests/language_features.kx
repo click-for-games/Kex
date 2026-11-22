@@ -1,0 +1,74 @@
+// Kex language feature tester: syntax upgraded in 1.1
+//
+//   kex tests/language_features.kx
+
+let checks = 0;
+let failures = 0;
+
+fn check(label, actual, expected) {
+    checks = checks + 1;
+    if (actual == expected) {
+        print("  ok    ", label);
+    } else {
+        failures = failures + 1;
+        print("  FAIL  ", label, " got ", actual, " want ", expected);
+    }
+}
+
+let sum = 0;
+for (let i = 0; i < 4; i++) {
+    sum += i;
+}
+check("classic for", sum, 6);
+
+let picked = 0;
+switch (2) {
+    case 1: picked = 10; break;
+    case 2: picked = 20; break;
+    default: picked = 30;
+}
+check("switch break", picked, 20);
+
+let caught = "";
+try {
+    error("boom");
+} catch (e) {
+    caught = e;
+}
+check("catch binding", count_of(to_str(caught), "boom") > 0, true);
+
+let items = [3, 1, 2];
+items.push(9);
+check("mutating method", to_str(items), "[3, 1, 2, 9]");
+
+let port = 8080;
+let config = { "host": "local", port };
+check("object shorthand", config.port, 8080);
+check("object shorthand host", config.host, "local");
+
+let n = 10;
+check("interpolation spec", "value {n:x} {n:04} {n:.2f}", "value a 0010 10.00");
+check("format spec", format('{:x} {:04} {:f2}', n, n, n), "a 0010 10.00");
+
+let template = `
+line one
+line two {n}
+`;
+check("multiline template", count_of(template, "line two 10") > 0, true);
+
+let score = 10;
+score &&= 0;
+check("and assign", score, false);
+let label = null;
+label ||= "fallback";
+check("or assign", label, "fallback");
+let maybe = 0;
+maybe ??= 7;
+check("coalesce assign keeps zero", maybe, 0);
+check("bitwise and", 6 & 2, 2);
+
+print("");
+print(checks - failures, "/", checks, " language checks passed");
+if (failures > 0) {
+    error("language feature tester failed");
+}

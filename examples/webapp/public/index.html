@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kex Web Starter</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <h1>Kex Web Starter</h1>
+    <p id="message">Loading...</p>
+    <form id="echo-form">
+      <input id="echo-input" placeholder="Type something">
+      <button type="submit">Send</button>
+    </form>
+    <pre id="echo-result"></pre>
+  </main>
+  <script>
+    fetch('/api/hello')
+      .then((res) => res.json())
+      .then((data) => { document.getElementById('message').textContent = data.message; });
+
+    document.getElementById('echo-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const text = document.getElementById('echo-input').value;
+      const res = await fetch('/api/echo', { method: 'POST', body: text });
+      const data = await res.json();
+      document.getElementById('echo-result').textContent = JSON.stringify(data, null, 2);
+    });
+  </script>
+</body>
+</html>

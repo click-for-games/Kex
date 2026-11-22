@@ -163,6 +163,11 @@ fn resolve_source(spec: &str) -> Result<Source, String> {
     if as_path.is_absolute() {
         return Ok(classify(as_path));
     }
+    if spec.starts_with("./") || spec.starts_with("../") {
+        if as_path.exists() {
+            return Ok(classify(as_path));
+        }
+    }
     for dir in registry_dirs() {
         let candidate = dir.join(&as_path);
         if candidate.exists() {
